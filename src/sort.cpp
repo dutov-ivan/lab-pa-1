@@ -18,7 +18,8 @@ int get_key(const std::string &s) {
     return firstNum;
 }
 
-void load_initial_series(const std::unique_ptr<IoDevice> &in, std::vector<std::unique_ptr<IoDevice> > &b_files) {
+void load_initial_series(const std::unique_ptr<InputDevice> &in,
+                         const std::vector<std::unique_ptr<FileManager> > &out_files) {
     int series_count = 0;
     int last_key = std::numeric_limits<int>::max();
     std::string line;
@@ -29,7 +30,7 @@ void load_initial_series(const std::unique_ptr<IoDevice> &in, std::vector<std::u
             break;
         }
         const int new_key = get_key(line);
-        const std::unique_ptr<IoDevice> &os = b_files[series_count % b_files.size()];
+        const std::unique_ptr<OutputDevice> &os = out_files[series_count % out_files.size()]->output();
         if (new_key > last_key) {
             os->write(buffer);
             buffer.clear();
@@ -40,16 +41,17 @@ void load_initial_series(const std::unique_ptr<IoDevice> &in, std::vector<std::u
     }
 
     if (!buffer.empty()) {
-        const std::unique_ptr<IoDevice> &os = b_files[series_count % b_files.size()];
+        const std::unique_ptr<OutputDevice> &os = out_files[series_count % out_files.size()]->output();
         os->write(buffer);
-        os->flush();
     }
 
-    reset_file_cursors(b_files);
+    for (const auto &file: out_files) {
+        file->reset_cursor();
+    }
 }
 
-void merge_many_into_many(const std::vector<std::unique_ptr<IoDevice> > *cur_fileset,
-                          const std::vector<std::unique_ptr<IoDevice> > *opposite_fileset) {
+void merge_many_into_many(const std::vector<std::unique_ptr<FileManager> > *cur_fileset,
+                          const std::vector<std::unique_ptr<FileManager> > *opposite_fileset) {
     const size_t FILE_COUNT = cur_fileset->size();
     uint32_t active_files = (1u << FILE_COUNT) - 1;
 
@@ -58,7 +60,7 @@ void merge_many_into_many(const std::vector<std::unique_ptr<IoDevice> > *cur_fil
         uint32_t temp = active_files;
         while (temp != 0) {
             const int output_idx = output_count % FILE_COUNT;
-            merge_many_into_one(*cur_fileset, (*opposite_fileset)[output_idx], active_files);
+            merge_many_into_one(*cur_fileset, (*opposite_fileset)[output_idx]->output(), active_files);
             output_count++;
 
             temp &= temp - 1;
@@ -66,26 +68,33 @@ void merge_many_into_many(const std::vector<std::unique_ptr<IoDevice> > *cur_fil
     }
 }
 
-std::unique_ptr<IoDevice> &external_sort(std::vector<std::unique_ptr<IoDevice> > &initial_from,
-                                         std::vector<std::unique_ptr<IoDevice> > &initial_to) {
+std::unique_ptr<FileManager> &external_sort(std::vector<std::unique_ptr<FileManager> > &initial_from,
+                                            std::vector<std::unique_ptr<FileManager> > &initial_to) {
     assert(initial_from.size() == initial_to.size());
     auto *cur_fileset = &initial_from;
     auto *opposite_fileset = &initial_to;
-    std::unique_ptr<IoDevice> *result;
     while (true) {
-        if (!(*cur_fileset)[0]->is_end() && (*cur_fileset)[1]->is_end()) {
+        if (!(*cur_fileset)[0]->is_empty() && (*cur_fileset)[1]->is_empty()) {
             return (*cur_fileset)[0];
         }
         merge_many_into_many(cur_fileset, opposite_fileset);
-        reset_files(*cur_fileset);
-        reset_file_cursors(*opposite_fileset);
-        for (const auto &file: *cur_fileset) { file->flush(); }
+
+        for (const auto &file: *opposite_fileset) { file->output()->flush(); }
+
+        for (const auto &file: *cur_fileset) {
+            file->clear();
+        }
+
+        for (const auto &file: *opposite_fileset) {
+            file->reset_cursor();
+        }
+
         std::swap(cur_fileset, opposite_fileset);
     }
 }
 
-auto merge_many_into_one(const std::vector<std::unique_ptr<IoDevice> > &cur_fileset,
-                         const std::unique_ptr<IoDevice> &out_file,
+auto merge_many_into_one(const std::vector<std::unique_ptr<FileManager> > &cur_fileset,
+                         const std::unique_ptr<OutputDevice> &out_file,
                          uint32_t &active_files) -> void {
     const size_t FILE_COUNT = cur_fileset.size();
     std::vector<std::string> lines(FILE_COUNT);
@@ -93,7 +102,7 @@ auto merge_many_into_one(const std::vector<std::unique_ptr<IoDevice> > &cur_file
 
     // Initial pass to retrieve all initial keys of the runs.
     for (int i = 0; i < FILE_COUNT; i++) {
-        const auto &is = cur_fileset[i];
+        const auto &is = cur_fileset[i]->input();
         if (!is->get_line(lines[i])) {
             active_files &= ~(1 << i);
             continue;
@@ -107,10 +116,10 @@ auto merge_many_into_one(const std::vector<std::unique_ptr<IoDevice> > &cur_file
         pq.pop();
 
         // Push the line with that element to the output
-        out_file->write(lines[idx]);
+        out_file->write(lines[idx] + "\n");
 
         // Load new line from the file we got the line we pushed
-        const auto &is = cur_fileset[idx];
+        const auto &is = cur_fileset[idx]->input();
         if (is->peek(lines[idx])) {
             int new_key = get_key(lines[idx]);
 

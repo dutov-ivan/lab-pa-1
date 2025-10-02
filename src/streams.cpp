@@ -17,14 +17,12 @@
 #include <sys/stat.h>
 #include <string.h>
 
-MmappedDevice::MmappedDevice(const std::string &path, int flags, mode_t mode, bool temporary) : path_(path),
-    flags_(flags), mode_(mode) {
-    initialize();
+MmappedInputDevice::MmappedInputDevice(int fd) : fd_(fd) {
+    MmappedInputDevice::reset_cursor();
 }
 
-
-bool MmappedDevice::get_line(std::string &line) {
-    assert(data_);
+bool MmappedInputDevice::get_line(std::string &line) {
+    if (!data_) return false;
     if (was_ended_) return false;
 
     auto *start = data_ + offset_;
@@ -40,7 +38,7 @@ bool MmappedDevice::get_line(std::string &line) {
     if (!next_data_) {
         line.assign(start, avail);
         was_ended_ = true;
-        return true;
+        return avail > 0;
     }
 
     const size_t next_chunk_size = this_chunk_size(cur_chunk_ + 1);
@@ -63,50 +61,13 @@ bool MmappedDevice::get_line(std::string &line) {
     return true;
 }
 
-IoDevice &MmappedDevice::write(const std::string &data) {
-    const char *buf = data.c_str();
-    size_t left = data.size();
-    while (left > 0) {
-        ssize_t n = ::write(fd_, buf, left);
-        if (n < 0) {
-            if (errno == EINTR) continue; // retry
-            throw std::system_error(errno, std::generic_category(), "write failed");
-        }
-        buf += n;
-        left -= n;
-    }
-    return *this;
-}
-
-void MmappedDevice::reset_cursor() {
-    unmap_chunk(data_, cur_chunk_);
-    unmap_chunk(next_data_, cur_chunk_);
-    initialize();
-}
-
-bool MmappedDevice::is_open() {
-    return fd_ != -1;
-}
-
-void MmappedDevice::clear() {
-    reset_cursor();
-    ::close(fd_);
-    initialize();
-}
-
-void MmappedDevice::close() {
-    ::close(fd_);
-}
-
-void MmappedDevice::flush() {
-}
-
-bool MmappedDevice::is_end() {
+bool MmappedInputDevice::is_end() {
     return was_ended_;
 }
 
-bool MmappedDevice::peek(std::string &line) {
-    assert(data_);
+bool MmappedInputDevice::peek(std::string &line) {
+    if (!data_) return false;
+
     if (was_ended_) return false;
 
     auto *start = data_ + offset_;
@@ -115,6 +76,12 @@ bool MmappedDevice::peek(std::string &line) {
     if (auto *nl = static_cast<char *>(::memchr(start, '\n', avail))) {
         line.assign(start, nl - start);
         return true;
+    }
+
+    if (!next_data_) {
+        line.assign(start, avail);
+        was_ended_ = true;
+        return avail > 0;
     }
 
     // No newline in this chunk: check next chunk
@@ -133,18 +100,47 @@ bool MmappedDevice::peek(std::string &line) {
     return true;
 }
 
-void MmappedDevice::initialize() {
-    const int fd = ::open(path_.c_str(), flags_, mode_);
-    if (fd == -1) {
-        ::perror("open");
+void MmappedInputDevice::skip(std::size_t bytes) {
+    if (!data_) return;
+
+    if (was_ended_) return;
+
+    auto *start = data_ + offset_;
+    size_t avail = this_chunk_size(cur_chunk_) - offset_;
+
+
+    if (auto *nl = static_cast<char *>(::memchr(start, '\n', avail))) {
+        offset_ += nl - start + 1;
         return;
     }
-    fd_ = fd;
+
+    if (!next_data_) {
+        was_ended_ = true;
+        return;
+    }
+
+    const size_t next_chunk_size = this_chunk_size(cur_chunk_ + 1);
+    // No newline in this chunk: check next chunk
+    auto *nl2 = static_cast<char *>(::memchr(next_data_, '\n', next_chunk_size));
+    if (!nl2) {
+        // no newline at all: take remainder of both chunks safely
+        was_ended_ = true;
+        return;
+    }
+
+    // newline found in next chunk
+    size_t new_offset = nl2 - next_data_ + 1;
+    map_next_chunk();
+    offset_ = new_offset;
+}
+
+void MmappedInputDevice::reset_cursor() {
+    unmap_chunk(data_, cur_chunk_);
+    unmap_chunk(next_data_, cur_chunk_);
 
     struct stat sb{};
-    if (::fstat(fd, &sb) == -1) {
+    if (::fstat(fd_, &sb) == -1) {
         perror("fstat");
-        ::close(fd);
         return;
     }
 
@@ -161,8 +157,7 @@ void MmappedDevice::initialize() {
     offset_ = 0;
 }
 
-
-void MmappedDevice::map_next_chunk() {
+void MmappedInputDevice::map_next_chunk() {
     assert(data_);
     unmap_chunk(data_, cur_chunk_);
 
@@ -182,7 +177,10 @@ void MmappedDevice::map_next_chunk() {
     offset_ = 0;
 }
 
-char *MmappedDevice::map_chunk(const std::size_t chunk_index) {
+char *MmappedInputDevice::map_chunk(std::size_t chunk_index) {
+    if (file_size_ == 0) {
+        return nullptr;
+    }
     const size_t bytes_to_map = std::min(chunk_size_, file_size_ - chunk_index * chunk_size_);
     const off_t offset = chunk_index * chunk_size_;
 
@@ -190,6 +188,7 @@ char *MmappedDevice::map_chunk(const std::size_t chunk_index) {
     if (mapped == MAP_FAILED) {
         ::perror("mmap");
         ::close(fd_);
+        fd_ = -1;
         return nullptr;
     }
 
@@ -197,18 +196,120 @@ char *MmappedDevice::map_chunk(const std::size_t chunk_index) {
     return data;
 }
 
-void MmappedDevice::unmap_chunk(char *ptr, const std::size_t chunk_index) const {
+void MmappedInputDevice::unmap_chunk(char *ptr, std::size_t chunk_index) const {
     if (!ptr || chunk_index >= chunk_count_) return;
 
     const size_t len = (chunk_index == chunk_count_ - 1) ? last_chunk_size_ : chunk_size_;
     ::munmap(ptr, len);
 }
 
-std::size_t MmappedDevice::this_chunk_size(std::size_t i) const {
+std::size_t MmappedInputDevice::this_chunk_size(std::size_t i) const {
     return i == chunk_count_ - 1 ? last_chunk_size_ : chunk_size_;
 }
 
-void MmappedDevice::skip(std::size_t bytes) {
+BufferWritingDevice::BufferWritingDevice(int fd) : fd_(fd) {
+}
+
+void BufferWritingDevice::write(const std::string &data) {
+    const char *buf = data.c_str();
+    size_t left = data.size();
+    while (left > 0) {
+        ssize_t n = ::write(fd_, buf, left);
+        if (n < 0) {
+            if (errno == EINTR) continue; // retry
+            throw std::system_error(errno, std::generic_category(), "write failed");
+        }
+        buf += n;
+        left -= n;
+    }
+}
+
+void BufferWritingDevice::reset_cursor() {
+    ::lseek(fd_, 0, SEEK_SET);
+}
+
+void BufferWritingDevice::flush() {
+    if (::fsync(fd_) == -1) {
+        ::perror("fsync");
+    }
+}
+
+UnixFileManager::UnixFileManager(std::string path, int flags, mode_t mode) : mode_(mode), path_(path), flags_(flags) {
+    const int fd = ::open(path.c_str(), flags_, mode_);
+    if (fd == -1) {
+        ::perror("open");
+        fd_ = -1;
+        return;
+    }
+    fd_ = fd;
+}
+
+
+void UnixFileManager::clear() {
+    close();
+
+    const int fd = ::open(path_.c_str(), flags_ | O_TRUNC, mode_);
+    if (fd == -1) {
+        ::perror("open");
+        fd_ = -1;
+        return;
+    }
+    fd_ = fd;
+    input_device_ = nullptr;
+    output_device_ = nullptr;
+}
+
+void UnixFileManager::close() {
+    ::close(fd_);
+    fd_ = -1;
+}
+
+void UnixFileManager::delete_file() {
+    close();
+    std::filesystem::remove(path_);
+}
+
+int UnixFileManager::get_fd() const {
+    return fd_;
+}
+
+std::unique_ptr<InputDevice> &UnixFileManager::input() {
+    if (!input_device_) {
+        init_input();
+    }
+    return input_device_;
+}
+
+std::unique_ptr<OutputDevice> &UnixFileManager::output() {
+    if (!output_device_) {
+        init_output();
+    }
+    return output_device_;
+}
+
+void UnixFileManager::reset_cursor() {
+    if (input_device_) input_device_->reset_cursor();
+    if (output_device_) output_device_->reset_cursor();
+}
+
+void UnixFileManager::init_input() {
+    input_device_ = std::make_unique<MmappedInputDevice>(fd_);
+}
+
+void UnixFileManager::init_output() {
+    output_device_ = std::make_unique<BufferWritingDevice>(fd_);
+}
+
+bool UnixFileManager::is_empty() {
+    struct stat sb{};
+    if (::fstat(fd_, &sb) == -1) {
+        perror("fstat");
+        std::abort();
+        return true;
+    }
+
+    const size_t filesize = sb.st_size;
+    return filesize == 0;
 }
 
 FileStream::FileStream(std::string path,
@@ -290,25 +391,10 @@ void FileStream::skip(const std::size_t bytes) {
     file_.seekg(bytes, std::ios::cur);
 }
 
-void reset_files(const std::vector<std::unique_ptr<IoDevice> > &files) {
-    for (const auto &file: files) {
-        if (file->is_open()) {
-            file->close();
-        }
 
-        file->clear();
-    }
-}
-
-void initialize_merge_files(std::vector<std::unique_ptr<IoDevice> > &files, const std::string &prefix) {
+void initialize_merge_files(std::vector<std::unique_ptr<FileManager> > &files, const std::string &prefix) {
     for (size_t i = 0; i < files.size(); i++) {
-        files[i] = std::make_unique<MmappedDevice>(prefix + std::to_string(i),
-                                                   O_RDWR | O_TRUNC | O_CREAT, 0777);
-    }
-}
-
-void reset_file_cursors(const std::vector<std::unique_ptr<IoDevice> > &cur_fileset) {
-    for (const auto &file: cur_fileset) {
-        file->reset_cursor();
+        files[i] = std::make_unique<UnixFileManager>(prefix + std::to_string(i),
+                                                     O_RDWR | O_TRUNC | O_CREAT, 0777);
     }
 }

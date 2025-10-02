@@ -5,7 +5,7 @@
 using namespace std;
 
 int main() {
-    const size_t FILE_SIZE = 1 << 20; // 1 GB example
+    const size_t FILE_SIZE = 1 << 30; // 1 GB example
     const size_t BUFFER_SIZE = 1 << 20; // 1 MB buffer
 
     random_device rd;
