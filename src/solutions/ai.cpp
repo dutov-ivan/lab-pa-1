@@ -23,7 +23,7 @@ AiSolution::AiSolution(const std::vector<std::unique_ptr<FileManager> > &first_b
     assert(first_bucket_.size() == second_bucket_.size());
 }
 
-void AiSolution::load_initial_series(const std::unique_ptr<InputDevice> &in) {
+void AiSolution::load_initial_series(const std::unique_ptr<BufferedInputDevice> &in) {
     const std::vector<std::unique_ptr<FileManager> > &out_files = first_bucket_;
     int series_count = 0;
     int last_key = std::numeric_limits<int>::max();

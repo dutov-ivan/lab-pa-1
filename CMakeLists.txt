@@ -11,27 +11,30 @@ if (NOT CMAKE_BUILD_TYPE)
 endif ()
 
 # === Core library ===
-add_library(ExternalSortLib
-        src/streams.cpp
+add_library(FileLib
+        src/file/input.cpp
+        src/file/output.cpp
+        src/file/io.cpp
+        src/file/manager.cpp
 )
 
-target_include_directories(ExternalSortLib PUBLIC include)
+target_include_directories(FileLib PUBLIC include)
 
 # === Executables ===
 add_executable(generator src/generator.cpp)
-target_link_libraries(generator PRIVATE ExternalSortLib)
+target_link_libraries(generator PRIVATE FileLib)
 
 # main.cpp is reused, which class gets included depends on SOLUTION_TYPE
 add_executable(std_main src/main.cpp src/solutions/standard.cpp)
-target_link_libraries(std_main PRIVATE ExternalSortLib)
+target_link_libraries(std_main PRIVATE FileLib)
 target_compile_definitions(std_main PRIVATE SOLUTION_TYPE=1)
 
 add_executable(modified_main src/main.cpp src/solutions/modified.cpp)
-target_link_libraries(modified_main PRIVATE ExternalSortLib)
+target_link_libraries(modified_main PRIVATE FileLib)
 target_compile_definitions(modified_main PRIVATE SOLUTION_TYPE=2)
 
 add_executable(ai_main src/main.cpp src/solutions/ai.cpp)
-target_link_libraries(ai_main PRIVATE ExternalSortLib)
+target_link_libraries(ai_main PRIVATE FileLib)
 target_compile_definitions(ai_main PRIVATE SOLUTION_TYPE=3)
 
 # === GoogleTest ===
@@ -45,7 +48,7 @@ FetchContent_MakeAvailable(googletest)
 
 # === Test executable ===
 add_executable(tests test/ExternalSortTest.cpp)
-target_link_libraries(tests PRIVATE ExternalSortLib gtest_main gmock_main)
+target_link_libraries(tests PRIVATE FileLib gtest_main gmock_main)
 
 enable_testing()
 add_test(NAME ExternalSortTests COMMAND tests)

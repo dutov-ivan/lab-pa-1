@@ -1,21 +1,19 @@
 //
-// Created by dutov on 9/9/2025.
+// Created by dutov on 10/4/2025.
 //
 
-#include "../include/streams.h"
-
+#include "../include/file/input.h"
 #include <assert.h>
 #include <cstring>
 #include <fstream>
-#include <iostream>
 #include <memory>
 #include <filesystem>
-#include <utility>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <string.h>
+
 
 MmappedInputDevice::MmappedInputDevice(int fd) : fd_(fd) {
     MmappedInputDevice::reset_cursor();
@@ -29,7 +27,7 @@ bool MmappedInputDevice::get_line(std::string &line) {
     size_t avail = this_chunk_size(cur_chunk_) - offset_;
 
 
-    if (auto *nl = static_cast<char *>(::memchr(start, '\n', avail))) {
+    if (auto *nl = static_cast<char *>(std::memchr(start, '\n', avail))) {
         line.assign(start, nl - start);
         offset_ += nl - start + 1;
         return true;
@@ -187,8 +185,6 @@ char *MmappedInputDevice::map_chunk(std::size_t chunk_index) {
     void *mapped = ::mmap(nullptr, bytes_to_map, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, offset);
     if (mapped == MAP_FAILED) {
         ::perror("mmap");
-        ::close(fd_);
-        fd_ = -1;
         return nullptr;
     }
 
@@ -207,194 +203,48 @@ std::size_t MmappedInputDevice::this_chunk_size(std::size_t i) const {
     return i == chunk_count_ - 1 ? last_chunk_size_ : chunk_size_;
 }
 
-BufferWritingDevice::BufferWritingDevice(int fd) : fd_(fd) {
-}
 
-void BufferWritingDevice::write(const std::string &data) {
-    const char *buf = data.c_str();
-    size_t left = data.size();
-    while (left > 0) {
-        ssize_t n = ::write(fd_, buf, left);
-        if (n < 0) {
-            if (errno == EINTR) continue; // retry
-            throw std::system_error(errno, std::generic_category(), "write failed");
-        }
-        buf += n;
-        left -= n;
-    }
-}
-
-void BufferWritingDevice::reset_cursor() {
-    ::lseek(fd_, 0, SEEK_SET);
-}
-
-void BufferWritingDevice::flush() {
-    if (::fsync(fd_) == -1) {
-        ::perror("fsync");
-    }
-}
-
-UnixFileManager::UnixFileManager(std::string path, int flags, mode_t mode) : mode_(mode), path_(path), flags_(flags) {
-    const int fd = ::open(path.c_str(), flags_, mode_);
-    if (fd == -1) {
-        ::perror("open");
-        fd_ = -1;
-        return;
-    }
-    fd_ = fd;
-}
-
-
-void UnixFileManager::clear() {
-    close();
-
-    const int fd = ::open(path_.c_str(), flags_ | O_TRUNC, mode_);
-    if (fd == -1) {
-        ::perror("open");
-        fd_ = -1;
-        return;
-    }
-    fd_ = fd;
-    input_device_ = nullptr;
-    output_device_ = nullptr;
-}
-
-void UnixFileManager::close() {
-    ::close(fd_);
-    fd_ = -1;
-}
-
-void UnixFileManager::delete_file() {
-    close();
-    std::filesystem::remove(path_);
-}
-
-int UnixFileManager::get_fd() const {
-    return fd_;
-}
-
-std::unique_ptr<InputDevice> &UnixFileManager::input() {
-    if (!input_device_) {
-        init_input();
-    }
-    return input_device_;
-}
-
-std::unique_ptr<OutputDevice> &UnixFileManager::output() {
-    if (!output_device_) {
-        init_output();
-    }
-    return output_device_;
-}
-
-void UnixFileManager::reset_cursor() {
-    if (input_device_) input_device_->reset_cursor();
-    if (output_device_) output_device_->reset_cursor();
-}
-
-void UnixFileManager::init_input() {
-    input_device_ = std::make_unique<MmappedInputDevice>(fd_);
-}
-
-void UnixFileManager::init_output() {
-    output_device_ = std::make_unique<BufferWritingDevice>(fd_);
-}
-
-bool UnixFileManager::is_empty() {
+MmappedBufferedInputDevice::MmappedBufferedInputDevice(int fd, std::size_t buffer_size) : fd_(fd),
+    buffer_size_(buffer_size) {
+    assert(buffer_size > 0 && buffer_size % PAGE_SIZE_ == 0);
     struct stat sb{};
     if (::fstat(fd_, &sb) == -1) {
         perror("fstat");
-        std::abort();
-        return true;
+        return;
     }
 
     const size_t filesize = sb.st_size;
-    return filesize == 0;
+    file_size_ = filesize;
+    buffer_count_ = (filesize + buffer_size_ - 1) / buffer_size_;
 }
 
-FileStream::FileStream(std::string path,
-                       const std::ios::openmode mode,
-                       const bool temporary)
-    : path_(std::move(path)),
-      mode_(mode),
-      temporary_(temporary) {
-    clear();
-}
+std::size_t MmappedBufferedInputDevice::next_buffer(const char **buffer) {
+    if (was_ended_) return 0;
 
-
-FileStream::~FileStream() {
-    if (file_.is_open()) file_.close();
-    if (temporary_)
-        std::filesystem::remove(path_);
-}
-
-bool FileStream::get_line(std::string &line) {
-    if (!std::getline(file_, line)) {
-        return false;
+    std::size_t left = file_size_ - cur_buffer_ * buffer_size_;
+    std::size_t size = std::min(buffer_size_, left);
+    if (size == 0) {
+        was_ended_ = true;
+        return 0;
     }
-    return true;
-}
 
-IoDevice &FileStream::write(const std::string &data) {
-    if (!data.empty() && data.back() != '\n') {
-        file_ << data << "\n";
-    } else {
-        file_ << data;
+    void *mmapped = ::mmap(nullptr, size, PROT_READ, MAP_SHARED, fd_, cur_buffer_ * buffer_size_);
+    if (mmapped == MAP_FAILED) {
+        ::perror("mmap");
+        return 0;
     }
-    return *this;
+
+    const char *data = static_cast<const char *>(mmapped);
+    *buffer = data;
+    return size;
 }
 
 
-void FileStream::reset_cursor() {
-    file_.clear();
-    file_.seekg(0, std::ios::beg);
-    file_.seekp(0, std::ios::beg);
+void MmappedBufferedInputDevice::delete_buffer() {
+    ::munmap(const_cast<void *>(static_cast<const void *>(buffer_)), this_buffer_size(cur_buffer_));
+    buffer_ = nullptr;
 }
 
-bool FileStream::is_open() {
-    return file_.is_open();
-}
-
-void FileStream::clear() {
-    file_.open(path_, mode_ | std::ios_base::trunc);
-    if (!file_.is_open()) {
-        throw std::runtime_error("Could not open file " + path_ + " in mode " + to_string(mode_) + " .");
-    }
-}
-
-void FileStream::close() {
-    file_.close();
-}
-
-void FileStream::flush() {
-    file_.flush();
-}
-
-bool FileStream::is_end() {
-    const int c = file_.peek();
-    return c == EOF;
-}
-
-void FileStream::copy_contents_to(const std::string &path) {
-    this->close();
-    std::filesystem::copy(path_, path, std::filesystem::copy_options::overwrite_existing);
-}
-
-bool FileStream::peek(std::string &line) {
-    const auto pos = file_.tellg();
-    const bool result = this->get_line(line);
-    file_.seekg(pos);
-    return result;
-}
-
-void FileStream::skip(const std::size_t bytes) {
-    file_.seekg(bytes, std::ios::cur);
-}
-
-
-void initialize_merge_files(std::vector<std::unique_ptr<FileManager> > &files, const std::string &prefix) {
-    for (size_t i = 0; i < files.size(); i++) {
-        files[i] = std::make_unique<UnixFileManager>(prefix + std::to_string(i),
-                                                     O_RDWR | O_TRUNC | O_CREAT, 0777);
-    }
+std::size_t MmappedBufferedInputDevice::this_buffer_size(std::size_t i) const {
+    return i == buffer_count_ - 1 ? file_size_ - buffer_count_ * buffer_size_ : buffer_size_;
 }
