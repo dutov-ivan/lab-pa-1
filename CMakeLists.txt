@@ -13,8 +13,6 @@ endif ()
 # === Core library ===
 add_library(ExternalSortLib
         src/streams.cpp
-        include/standard.h
-        src/standard.cpp
 )
 
 target_include_directories(ExternalSortLib PUBLIC include)
@@ -23,8 +21,18 @@ target_include_directories(ExternalSortLib PUBLIC include)
 add_executable(generator src/generator.cpp)
 target_link_libraries(generator PRIVATE ExternalSortLib)
 
-add_executable(main_exec src/main.cpp)
-target_link_libraries(main_exec PRIVATE ExternalSortLib)
+# main.cpp is reused, which class gets included depends on SOLUTION_TYPE
+add_executable(std_main src/main.cpp src/solutions/standard.cpp)
+target_link_libraries(std_main PRIVATE ExternalSortLib)
+target_compile_definitions(std_main PRIVATE SOLUTION_TYPE=1)
+
+add_executable(modified_main src/main.cpp src/solutions/modified.cpp)
+target_link_libraries(modified_main PRIVATE ExternalSortLib)
+target_compile_definitions(modified_main PRIVATE SOLUTION_TYPE=2)
+
+add_executable(ai_main src/main.cpp src/solutions/ai.cpp)
+target_link_libraries(ai_main PRIVATE ExternalSortLib)
+target_compile_definitions(ai_main PRIVATE SOLUTION_TYPE=3)
 
 # === GoogleTest ===
 include(FetchContent)

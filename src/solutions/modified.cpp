@@ -2,7 +2,8 @@
 // Created by dutov on 10/3/2025.
 //
 
-#include "../../include/solution/standard.h"
+#include "../../include/solution/modified.h"
+
 #include <limits>
 #include <queue>
 #include <cassert>
@@ -16,13 +17,14 @@ int get_key(const std::string &s) {
     return key;
 }
 
-StdSolution::StdSolution(const std::vector<std::unique_ptr<FileManager> > &first_bucket,
-                         const std::vector<std::unique_ptr<FileManager> > &second_bucket) : first_bucket_(first_bucket),
+ModifiedSolution::ModifiedSolution(const std::vector<std::unique_ptr<FileManager> > &first_bucket,
+                                   const std::vector<std::unique_ptr<FileManager> > &second_bucket) : first_bucket_(
+        first_bucket),
     second_bucket_(second_bucket) {
     assert(first_bucket_.size() == second_bucket_.size());
 }
 
-void StdSolution::load_initial_series(const std::unique_ptr<InputDevice> &in) {
+void ModifiedSolution::load_initial_series(const std::unique_ptr<InputDevice> &in) {
     const std::vector<std::unique_ptr<FileManager> > &out_files = first_bucket_;
     int series_count = 0;
     int last_key = std::numeric_limits<int>::max();
@@ -54,7 +56,7 @@ void StdSolution::load_initial_series(const std::unique_ptr<InputDevice> &in) {
     }
 }
 
-const std::unique_ptr<FileManager> &StdSolution::external_sort() {
+const std::unique_ptr<FileManager> &ModifiedSolution::external_sort() {
     auto *cur_fileset = &first_bucket_;
     auto *opposite_fileset = &second_bucket_;
     while (true) {
@@ -77,8 +79,8 @@ const std::unique_ptr<FileManager> &StdSolution::external_sort() {
     }
 }
 
-void StdSolution::merge_many_into_many(const std::vector<std::unique_ptr<FileManager> > *cur_fileset,
-                                       const std::vector<std::unique_ptr<FileManager> > *opposite_fileset) {
+void ModifiedSolution::merge_many_into_many(const std::vector<std::unique_ptr<FileManager> > *cur_fileset,
+                                            const std::vector<std::unique_ptr<FileManager> > *opposite_fileset) {
     const size_t FILE_COUNT = cur_fileset->size();
     uint32_t active_files = (1u << FILE_COUNT) - 1;
 
@@ -95,9 +97,9 @@ void StdSolution::merge_many_into_many(const std::vector<std::unique_ptr<FileMan
     }
 }
 
-void StdSolution::merge_many_into_one(const std::vector<std::unique_ptr<FileManager> > &cur_fileset,
-                                      const std::unique_ptr<OutputDevice> &out_file,
-                                      uint32_t &active_files) {
+void ModifiedSolution::merge_many_into_one(const std::vector<std::unique_ptr<FileManager> > &cur_fileset,
+                                           const std::unique_ptr<OutputDevice> &out_file,
+                                           uint32_t &active_files) {
     const size_t FILE_COUNT = cur_fileset.size();
     std::vector<std::string> lines(FILE_COUNT);
     std::priority_queue<std::pair<int, int> > pq; // (key, file_index)
