@@ -12,8 +12,9 @@ endif ()
 
 # === Core library ===
 add_library(ExternalSortLib
-        src/sort.cpp
         src/streams.cpp
+        include/standard.h
+        src/standard.cpp
 )
 
 target_include_directories(ExternalSortLib PUBLIC include)

@@ -1,25 +1,29 @@
 //
-// Created by dutov on 9/9/2025.
+// Created by dutov on 10/3/2025.
 //
 
-#include "../include/sort.h"
-
-#include <assert.h>
-#include <string>
+#include "../../include/standard.h"
 #include <limits>
-#include <memory>
 #include <queue>
-
-#include "../include/streams.h"
+#include <cassert>
 
 int get_key(const std::string &s) {
-    const size_t pos = s.find('-');
-    const int firstNum = std::stoi(s.substr(0, pos));
-    return firstNum;
+    size_t pos;
+    int key = std::stoi(s, &pos); // stops at first non-digit
+    if (pos == 0) {
+        throw std::runtime_error("Could not extract key from line: " + s);
+    }
+    return key;
 }
 
-void load_initial_series(const std::unique_ptr<InputDevice> &in,
-                         const std::vector<std::unique_ptr<FileManager> > &out_files) {
+StdSolution::StdSolution(const std::vector<std::unique_ptr<FileManager> > &first_bucket,
+                         const std::vector<std::unique_ptr<FileManager> > &second_bucket) : first_bucket_(first_bucket),
+    second_bucket_(second_bucket) {
+    assert(first_bucket_.size() == second_bucket_.size());
+}
+
+void StdSolution::load_initial_series(const std::unique_ptr<InputDevice> &in) {
+    const std::vector<std::unique_ptr<FileManager> > &out_files = first_bucket_;
     int series_count = 0;
     int last_key = std::numeric_limits<int>::max();
     std::string line;
@@ -50,29 +54,9 @@ void load_initial_series(const std::unique_ptr<InputDevice> &in,
     }
 }
 
-void merge_many_into_many(const std::vector<std::unique_ptr<FileManager> > *cur_fileset,
-                          const std::vector<std::unique_ptr<FileManager> > *opposite_fileset) {
-    const size_t FILE_COUNT = cur_fileset->size();
-    uint32_t active_files = (1u << FILE_COUNT) - 1;
-
-    size_t output_count = 0;
-    while (active_files != 0) {
-        uint32_t temp = active_files;
-        while (temp != 0) {
-            const int output_idx = output_count % FILE_COUNT;
-            merge_many_into_one(*cur_fileset, (*opposite_fileset)[output_idx]->output(), active_files);
-            output_count++;
-
-            temp &= temp - 1;
-        }
-    }
-}
-
-std::unique_ptr<FileManager> &external_sort(std::vector<std::unique_ptr<FileManager> > &initial_from,
-                                            std::vector<std::unique_ptr<FileManager> > &initial_to) {
-    assert(initial_from.size() == initial_to.size());
-    auto *cur_fileset = &initial_from;
-    auto *opposite_fileset = &initial_to;
+const std::unique_ptr<FileManager> &StdSolution::external_sort() {
+    auto *cur_fileset = &first_bucket_;
+    auto *opposite_fileset = &second_bucket_;
     while (true) {
         if (!(*cur_fileset)[0]->is_empty() && (*cur_fileset)[1]->is_empty()) {
             return (*cur_fileset)[0];
@@ -93,9 +77,27 @@ std::unique_ptr<FileManager> &external_sort(std::vector<std::unique_ptr<FileMana
     }
 }
 
-auto merge_many_into_one(const std::vector<std::unique_ptr<FileManager> > &cur_fileset,
-                         const std::unique_ptr<OutputDevice> &out_file,
-                         uint32_t &active_files) -> void {
+void StdSolution::merge_many_into_many(const std::vector<std::unique_ptr<FileManager> > *cur_fileset,
+                                       const std::vector<std::unique_ptr<FileManager> > *opposite_fileset) {
+    const size_t FILE_COUNT = cur_fileset->size();
+    uint32_t active_files = (1u << FILE_COUNT) - 1;
+
+    size_t output_count = 0;
+    while (active_files != 0) {
+        uint32_t temp = active_files;
+        while (temp != 0) {
+            const int output_idx = output_count % FILE_COUNT;
+            merge_many_into_one(*cur_fileset, (*opposite_fileset)[output_idx]->output(), active_files);
+            output_count++;
+
+            temp &= temp - 1;
+        }
+    }
+}
+
+void StdSolution::merge_many_into_one(const std::vector<std::unique_ptr<FileManager> > &cur_fileset,
+                                      const std::unique_ptr<OutputDevice> &out_file,
+                                      uint32_t &active_files) {
     const size_t FILE_COUNT = cur_fileset.size();
     std::vector<std::string> lines(FILE_COUNT);
     std::priority_queue<std::pair<int, int> > pq; // (key, file_index)

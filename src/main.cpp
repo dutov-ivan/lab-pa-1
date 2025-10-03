@@ -4,8 +4,8 @@
 #include <memory>
 #include <filesystem>
 #include "../include/streams.h"
-#include "../include/sort.h"
 #include <fcntl.h>
+#include "../include/standard.h"
 
 
 int main(int argc, char const *argv[]) {
@@ -18,14 +18,11 @@ int main(int argc, char const *argv[]) {
     std::vector<std::unique_ptr<FileManager> > c_files(FILE_COUNT);
     initialize_merge_files(c_files, "c");
 
-    load_initial_series(in_manager->input(), b_files);
+    StdSolution solution(b_files, c_files);
 
-    for (int i = 0; i < FILE_COUNT; i++) {
-        b_files[i]->output()->flush();
-        b_files[i]->output()->reset_cursor();
-    }
+    solution.load_initial_series(in_manager->input());
 
-    const std::unique_ptr<FileManager> &result = external_sort(b_files, c_files);
+    const std::unique_ptr<FileManager> &result = solution.external_sort();
     result->output()->flush();
 
     return 0;

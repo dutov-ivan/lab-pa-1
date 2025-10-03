@@ -148,12 +148,12 @@ void MmappedInputDevice::reset_cursor() {
     const size_t pagesize = ::sysconf(_SC_PAGE_SIZE);
 
     file_size_ = filesize;
-    chunk_size_ = pagesize;
+    chunk_size_ = pagesize * 1024; // 4MB chunks
     last_chunk_size_ = filesize % chunk_size_;
     chunk_count_ = (filesize + chunk_size_ - 1) / chunk_size_;
     cur_chunk_ = 0;
     data_ = map_chunk(0);
-    next_data_ = map_chunk(1);
+    next_data_ = file_size_ < chunk_size_ ? nullptr : map_chunk(1);
     offset_ = 0;
 }
 
