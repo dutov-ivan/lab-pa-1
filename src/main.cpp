@@ -5,6 +5,10 @@
 #include <filesystem>
 #include <fcntl.h>
 
+#include "../include/file/manager.h"
+#include "../include/file/input.h"
+#include "../include/file/output.h"
+
 #if SOLUTION_TYPE == 1
 #include "../include/solution/standard.h"
 using ActiveSolution = StdSolution;

@@ -12,7 +12,7 @@ public:
     explicit StdSolution(const std::vector<std::unique_ptr<FileManager> > &first_bucket,
                          const std::vector<std::unique_ptr<FileManager> > &second_bucket);
 
-    void load_initial_series(const std::unique_ptr<InputDevice> &in) override;
+    void load_initial_series(const std::unique_ptr<BufferedInputDevice> &in) override;
 
     const FileManager &external_sort(
     ) override;

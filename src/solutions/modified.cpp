@@ -5,8 +5,12 @@
 #include "../../include/solution/modified.h"
 
 #include <limits>
+#include <charconv>
 #include <queue>
 #include <cassert>
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
 
 int get_key(const std::string &s) {
     size_t pos;
@@ -17,38 +21,118 @@ int get_key(const std::string &s) {
     return key;
 }
 
-ModifiedSolution::ModifiedSolution(const std::vector<std::unique_ptr<FileManager> > &first_bucket,
-                                   const std::vector<std::unique_ptr<FileManager> > &second_bucket) : first_bucket_(
-        first_bucket),
-    second_bucket_(second_bucket) {
-    assert(first_bucket_.size() == second_bucket_.size());
-}
+bool get_key_from_buffer(int &key, const char *buffer, std::size_t buffer_size, std::size_t &start) {
+    const char *begin = buffer + start;
+    const char *end = buffer + buffer_size; // or known buffer length
 
-void ModifiedSolution::load_initial_series(const std::unique_ptr<InputDevice> &in) {
-    const std::vector<std::unique_ptr<FileManager> > &out_files = first_bucket_;
-    int series_count = 0;
-    int last_key = std::numeric_limits<int>::max();
-    std::string line;
-    std::string buffer;
+    int tmp;
+    auto [ptr, ec] = std::from_chars(begin, end, tmp);
 
-    while (in->get_line(line)) {
-        if (line == "") {
-            break;
-        }
-        const int new_key = get_key(line);
-        const std::unique_ptr<OutputDevice> &os = out_files[series_count % out_files.size()]->output();
-        if (new_key > last_key) {
-            os->write(buffer);
-            buffer.clear();
-            series_count++;
-        }
-        last_key = new_key;
-        buffer += line + "\n";
+    if (ec != std::errc()) {
+        return false; // invalid or out of range
     }
 
-    if (!buffer.empty()) {
-        const std::unique_ptr<OutputDevice> &os = out_files[series_count % out_files.size()]->output();
-        os->write(buffer);
+    if (ptr == begin) {
+        return false; // no digits consumed
+    }
+
+    key = tmp;
+    start = static_cast<std::size_t>(ptr - buffer); // update caller’s offset
+    return true;
+}
+
+ModifiedSolution::ModifiedSolution(const std::vector<std::unique_ptr<FileManager> > &first_bucket,
+                                   const std::vector<std::unique_ptr<FileManager> > &second_bucket) {
+    assert(first_bucket.size() == second_bucket.size());
+    std::vector<std::unique_ptr<InputDevice> > first_inputs(first_bucket.size());
+    std::vector<std::unique_ptr<OutputDevice> > first_outputs(first_bucket.size());
+    for (size_t i = 0; i < first_bucket.size(); ++i) {
+        int fd = first_bucket[i]->get_fd();
+        first_inputs[i] = std::make_unique<MmappedInputDevice>(fd);
+        first_outputs[i] = std::make_unique<BufferWritingDevice>(fd);
+    }
+
+    std::vector<std::unique_ptr<InputDevice> > second_inputs(second_bucket.size());
+    std::vector<std::unique_ptr<OutputDevice> > second_outputs(second_bucket.size());
+    for (size_t i = 0; i < first_bucket.size(); ++i) {
+        int fd = first_bucket[i]->get_fd();
+        second_inputs[i] = std::make_unique<MmappedInputDevice>(fd);
+        second_outputs[i] = std::make_unique<BufferWritingDevice>(fd);
+    }
+}
+
+void ModifiedSolution::write_entries(const std::vector<std::pair<int, std::string> > &entries,
+                                     std::unique_ptr<OutputDevice> &out) {
+    constexpr size_t BUFFER_SIZE = 64 * 1024; // 64 KB buffer
+    char buffer[BUFFER_SIZE];
+    size_t pos = 0;
+
+    for (size_t i = 0; i < entries.size(); ++i) {
+        const auto &[num, str] = entries[i];
+        std::string line = std::to_string(num) + "-" + str + "\n";
+
+        if (pos + line.size() > BUFFER_SIZE) {
+            out->write(buffer, pos);
+            pos = 0;
+        }
+
+        std::memcpy(buffer + pos, line.data(), line.size());
+        pos += line.size();
+    }
+
+    // flush remaining
+    if (pos > 0) {
+        out->write(buffer, pos);
+    }
+}
+
+void ModifiedSolution::load_initial_series(const std::unique_ptr<BufferedInputDevice> &in) {
+    const std::vector<std::unique_ptr<FileManager> > &out_files = first_bucket_;
+    int series_count = 0;
+    constexpr std::size_t MB_100 = 100 * 1024 * 1024;
+    const char *buffer;
+    std::size_t buffer_size;
+
+
+    std::string remnant = "";
+    while ((buffer_size = in->next_buffer(&buffer))) {
+        std::vector<std::pair<int, std::string> > entries;
+        std::size_t offset = 0;
+        while (offset < buffer_size) {
+            int key = 0;
+            std::string line = "";
+
+            if (!get_key_from_buffer(key, buffer, buffer_size, offset) && remnant.empty()) {
+                throw std::runtime_error("Malformed input: could not read key from buffer");
+            };
+
+            auto nl = static_cast<const char *>(std::memchr(buffer + offset, '\n', buffer_size - offset));
+            if (!nl) {
+                remnant = std::string(buffer + offset, buffer_size - offset);
+                continue;
+            }
+
+
+            if (!remnant.empty()) {
+                line = remnant;
+                remnant = "";
+            }
+
+            line += std::string(buffer + offset, nl - (buffer + offset));
+
+            entries.emplace_back(key, line);
+
+            offset += (nl - (buffer + offset)) + 1; // move past newline
+        }
+
+        std::sort(entries.begin(), entries.end(), [](const auto &a, const auto &b) {
+            return a.first < b.first;
+        });
+
+
+        std::unique_ptr<OutputDevice> &os = out_files[series_count % out_files.size()]->output();
+        write_entries(entries, os);
+        series_count++;
     }
 
     for (const auto &file: out_files) {
