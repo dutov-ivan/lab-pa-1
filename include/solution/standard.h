@@ -17,7 +17,7 @@ public:
     const std::unique_ptr<FileManager> &external_sort(
     ) override;
 
-private:w
+private:
     void merge_many_into_many(const std::vector<std::unique_ptr<FileManager> > *cur_fileset,
                               const std::vector<std::unique_ptr<FileManager> > *opposite_fileset) override;
 

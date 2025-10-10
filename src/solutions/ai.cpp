@@ -1,139 +1,254 @@
-//
-// Created by dutov on 10/3/2025.
-//
+#include "../include/solution/ai.h"
+#include <iostream>
+#include <algorithm>
+#include <stdexcept>
 
-#include "../../include/solution/ai.h"
-
-#include <limits>
-#include <queue>
-#include <cassert>
-
-int get_key(const std::string &s) {
-    size_t pos;
-    int key = std::stoi(s, &pos); // stops at first non-digit
-    if (pos == 0) {
-        throw std::runtime_error("Could not extract key from line: " + s);
-    }
-    return key;
-}
-
-AiSolution::AiSolution(const std::vector<std::unique_ptr<FileManager> > &first_bucket,
-                       const std::vector<std::unique_ptr<FileManager> > &second_bucket) : first_bucket_(first_bucket),
-    second_bucket_(second_bucket) {
-    assert(first_bucket_.size() == second_bucket_.size());
-}
-
-void AiSolution::load_initial_series(const std::unique_ptr<InputDevice> &in) {
-    const std::vector<std::unique_ptr<FileManager> > &out_files = first_bucket_;
-    int series_count = 0;
-    int last_key = std::numeric_limits<int>::max();
+// A helper struct for the k-way merge min-heap. It holds a line of data
+// and the index of the source file it came from.
+struct HeapNode {
     std::string line;
-    std::string buffer;
+    size_t source_index;
 
-    while (in->get_line(line)) {
-        if (line == "") {
-            break;
-        }
-        const int new_key = get_key(line);
-        const std::unique_ptr<OutputDevice> &os = out_files[series_count % out_files.size()]->output();
-        if (new_key > last_key) {
-            os->write(buffer);
-            buffer.clear();
-            series_count++;
-        }
-        last_key = new_key;
-        buffer += line + "\n";
+    // Invert comparison to make std::priority_queue a min-heap.
+    bool operator>(const HeapNode& other) const {
+        return line > other.line;
     }
+};
 
-    if (!buffer.empty()) {
-        const std::unique_ptr<OutputDevice> &os = out_files[series_count % out_files.size()]->output();
-        os->write(buffer);
-    }
-
-    for (const auto &file: out_files) {
-        file->reset_cursor();
+AiSolution::AiSolution(
+    std::vector<std::unique_ptr<FileManager>> &b_files,
+    std::vector<std::unique_ptr<FileManager>> &c_files)
+    : b_files_(b_files), c_files_(c_files)
+{
+    // Initialize the thread pool for the parallel merge phase.
+    // We leave one core free for the main thread and potential OS scheduling.
+    const unsigned int thread_count = std::max(1u, std::thread::hardware_concurrency() - 1);
+    for (unsigned int i = 0; i < thread_count; ++i) {
+        thread_pool_.emplace_back([this] {
+            while (true) {
+                std::function<void()> task;
+                if (task_queue_.try_pop(task)) {
+                    task();
+                } else if (stop_threads_) {
+                    break;
+                } else {
+                    std::this_thread::yield();
+                }
+            }
+        });
     }
 }
 
-const std::unique_ptr<FileManager> &AiSolution::external_sort() {
-    auto *cur_fileset = &first_bucket_;
-    auto *opposite_fileset = &second_bucket_;
-    while (true) {
-        if (!(*cur_fileset)[0]->is_empty() && (*cur_fileset)[1]->is_empty()) {
-            return (*cur_fileset)[0];
+AiSolution::~AiSolution() {
+    // Gracefully shut down the thread pool.
+    stop_threads_ = true;
+    for (auto& t : thread_pool_) {
+        if (t.joinable()) {
+            t.join();
         }
-        merge_many_into_many(cur_fileset, opposite_fileset);
+    }
+}
 
-        for (const auto &file: *opposite_fileset) { file->output()->flush(); }
+void AiSolution::load_initial_series(std::unique_ptr<FileManager> &source_file) {
+    auto& input = source_file->input();
 
-        for (const auto &file: *cur_fileset) {
+    MinHeap primary_heap;
+    std::vector<std::string> secondary_storage;
+    size_t current_heap_mem = 0;
+    size_t current_secondary_mem = 0;
+
+    // --- Phase 1: Fill the initial heap up to the memory budget ---
+    std::string line;
+    while (!input->is_end() && current_heap_mem < HEAP_MEMORY_BUDGET) {
+        if (input->get_line(line)) {
+            current_heap_mem += line.capacity(); // Approximation of memory usage
+            primary_heap.push(std::move(line));
+        }
+    }
+
+    if (primary_heap.empty()) {
+        return; // Source file was empty.
+    }
+
+    size_t dest_file_idx = 0;
+    OutputDevice* current_output = nullptr;
+
+    // --- Phase 2: Generate runs using Replacement Selection ---
+    while (!primary_heap.empty() || !secondary_storage.empty()) {
+        if (primary_heap.empty()) {
+            // The current run has ended. Start a new run.
+            // Swap the secondary storage into the primary heap.
+            for (auto& s : secondary_storage) {
+                primary_heap.push(std::move(s));
+            }
+            secondary_storage.clear();
+            current_heap_mem = current_secondary_mem;
+            current_secondary_mem = 0;
+
+            if (current_output) {
+                current_output->flush();
+            }
+        }
+
+        // Ensure we have an active output file for the current run.
+        if (!current_output || primary_heap.size() == secondary_storage.size()) {
+             if (dest_file_idx >= b_files_.size()) {
+                throw std::runtime_error("Not enough temporary files for initial runs.");
+            }
+            current_output = b_files_[dest_file_idx]->output().get();
+            // Start a new run in the next file, wrapping around if necessary.
+            dest_file_idx = (dest_file_idx + 1);
+            if (dest_file_idx >= b_files_.size()) dest_file_idx = 0;
+        }
+
+        // Pop the minimum element and write it to the current run.
+        std::string min_element = std::move(const_cast<std::string&>(primary_heap.top()));
+        primary_heap.pop();
+        current_heap_mem -= min_element.capacity();
+        current_output->write(min_element + "\n");
+
+        // Read the next line from the source.
+        if (!input->is_end() && input->get_line(line)) {
+            // If the new element can be part of the current run, add it to the heap.
+            // Otherwise, place it in storage for the next run.
+            if (line >= min_element) {
+                current_heap_mem += line.capacity();
+                primary_heap.push(std::move(line));
+            } else {
+                current_secondary_mem += line.capacity();
+                secondary_storage.push_back(std::move(line));
+            }
+        }
+    }
+
+    // Final flush for the last written file.
+    if(current_output) {
+        current_output->flush();
+    }
+}
+
+const std::unique_ptr<FileManager>& AiSolution::external_sort() {
+    auto *from_bucket = &b_files_;
+    auto *to_bucket = &c_files_;
+
+    while (count_active_files(*from_bucket) > 1) {
+        // Perform a parallel merge pass from one bucket to the other.
+        parallel_merge_pass(*from_bucket, *to_bucket);
+
+        // Prepare for the next pass: clear source files and swap bucket roles.
+        for (auto& file : *from_bucket) {
             file->clear();
         }
-
-        for (const auto &file: *opposite_fileset) {
-            file->reset_cursor();
-        }
-
-        std::swap(cur_fileset, opposite_fileset);
+        std::swap(from_bucket, to_bucket);
     }
+
+    // Find the single remaining file with the sorted data.
+    for (const auto& file : *from_bucket) {
+        if (!file->is_empty()) {
+            return file;
+        }
+    }
+
+    // If all files are empty (e.g., empty input), return the first one.
+    return (*from_bucket)[0];
 }
 
-void AiSolution::merge_many_into_many(const std::vector<std::unique_ptr<FileManager> > *cur_fileset,
-                                      const std::vector<std::unique_ptr<FileManager> > *opposite_fileset) {
-    const size_t FILE_COUNT = cur_fileset->size();
-    uint32_t active_files = (1u << FILE_COUNT) - 1;
-
-    size_t output_count = 0;
-    while (active_files != 0) {
-        uint32_t temp = active_files;
-        while (temp != 0) {
-            const int output_idx = output_count % FILE_COUNT;
-            merge_many_into_one(*cur_fileset, (*opposite_fileset)[output_idx]->output(), active_files);
-            output_count++;
-
-            temp &= temp - 1;
+size_t AiSolution::count_active_files(const std::vector<std::unique_ptr<FileManager>>& bucket) {
+    size_t count = 0;
+    for (const auto& file : bucket) {
+        if (!file->is_empty()) {
+            count++;
         }
     }
+    return count;
 }
 
-void AiSolution::merge_many_into_one(const std::vector<std::unique_ptr<FileManager> > &cur_fileset,
-                                     const std::unique_ptr<OutputDevice> &out_file,
-                                     uint32_t &active_files) {
-    const size_t FILE_COUNT = cur_fileset.size();
-    std::vector<std::string> lines(FILE_COUNT);
-    std::priority_queue<std::pair<int, int> > pq; // (key, file_index)
+size_t AiSolution::parallel_merge_pass(
+    std::vector<std::unique_ptr<FileManager>>& from_bucket,
+    std::vector<std::unique_ptr<FileManager>>& to_bucket)
+{
+    // Reset file cursors for reading and writing.
+    for(auto& file : from_bucket) file->reset_cursor();
+    for(auto& file : to_bucket) file->clear();
 
-    // Initial pass to retrieve all initial keys of the runs.
-    for (int i = 0; i < FILE_COUNT; i++) {
-        const auto &is = cur_fileset[i]->input();
-        if (!is->get_line(lines[i])) {
-            active_files &= ~(1 << i);
-            continue;
-        }
-        const int key = get_key(lines[i]);
-        pq.emplace(key, i);
-    }
-
-    while (!pq.empty()) {
-        auto [key, idx] = pq.top();
-        pq.pop();
-
-        // Push the line with that element to the output
-        out_file->write(lines[idx] + "\n");
-
-        // Load new line from the file we got the line we pushed
-        const auto &is = cur_fileset[idx]->input();
-        if (is->peek(lines[idx])) {
-            int new_key = get_key(lines[idx]);
-
-            if (new_key > key) {
-                // Invalid key = new series
-                continue;
-            }
-            is->skip(lines[idx].size());
-            pq.emplace(new_key, idx);
-        } else {
-            active_files &= ~(1u << idx);
+    std::vector<FileManager*> active_sources;
+    for (auto& file : from_bucket) {
+        if (!file->is_empty()) {
+            active_sources.push_back(file.get());
         }
     }
+
+    if (active_sources.empty()) return 0;
+
+    // Number of merge tasks is limited by the number of available destination files.
+    size_t num_tasks = to_bucket.size();
+    if (num_tasks == 0) throw std::runtime_error("No destination files available for merging.");
+
+    tasks_in_progress_ = 0;
+
+    for (size_t i = 0; i < num_tasks; ++i) {
+        std::vector<std::reference_wrapper<InputDevice>> source_group;
+
+        // Distribute source files to tasks in a round-robin fashion.
+        for (size_t j = i; j < active_sources.size(); j += num_tasks) {
+            // FIX: Dereference the unique_ptr to get the InputDevice& for the reference_wrapper.
+            source_group.push_back(*active_sources[j]->input());
+        }
+
+        if (source_group.empty()) {
+            continue; // No sources assigned to this task, so skip.
+        }
+
+        FileManager* dest_fm = to_bucket[i].get();
+
+        tasks_in_progress_++;
+        // FIX: Push a simple lambda to the queue. No more std::packaged_task.
+        task_queue_.push([this, source_group, dest_fm] {
+            this->merge_group(source_group, *dest_fm->output());
+            tasks_in_progress_--;
+            cv_.notify_one();
+        });
+    }
+
+    // Wait for all dispatched tasks to complete.
+    {
+        std::unique_lock<std::mutex> lock(sync_mutex_);
+        cv_.wait(lock, [this] { return tasks_in_progress_ == 0; });
+    }
+
+    return count_active_files(to_bucket);
+}
+
+
+void AiSolution::merge_group(
+    std::vector<std::reference_wrapper<InputDevice>> sources,
+    OutputDevice& destination)
+{
+    if (sources.empty()) return;
+
+    // Use a min-heap for the k-way merge.
+    std::priority_queue<HeapNode, std::vector<HeapNode>, std::greater<HeapNode>> merge_heap;
+
+    // Prime the heap with the first line from each source.
+    for (size_t i = 0; i < sources.size(); ++i) {
+        std::string line;
+        if (sources[i].get().get_line(line)) {
+            merge_heap.push({std::move(line), i});
+        }
+    }
+
+    // Main merge loop.
+    while (!merge_heap.empty()) {
+        HeapNode top = std::move(const_cast<HeapNode&>(merge_heap.top()));
+        merge_heap.pop();
+
+        destination.write(top.line + "\n");
+
+        // Fetch the next line from the same source file and add it to the heap.
+        std::string next_line;
+        if (sources[top.source_index].get().get_line(next_line)) {
+            merge_heap.push({std::move(next_line), top.source_index});
+        }
+    }
+    destination.flush();
 }
