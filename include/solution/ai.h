@@ -12,6 +12,9 @@
 #include <atomic>
 
 #include "common.h"
+#include "../io/manager.h"
+#include "../io/reader.h"
+#include "../io/buffered_writer.h"
 
 // A simple thread-safe queue for managing tasks.
 template<typename T>
@@ -57,8 +60,8 @@ public:
      * @param c_files A reference to the second bucket of temporary files.
      */
     explicit AiSolution(
-        std::vector<std::unique_ptr<FileManager>> &b_files,
-        std::vector<std::unique_ptr<FileManager>> &c_files
+        std::vector<FileManager> &b_files,
+        std::vector<FileManager> &c_files
     );
 
     ~AiSolution() override;
@@ -68,28 +71,38 @@ public:
      * into the first bucket of temporary files using Replacement Selection.
      * @param source_file The FileManager for the initial unsorted data.
      */
-    void load_initial_series(std::unique_ptr<FileManager> &source_file) override;
+    void load_initial_series(FileManager &source_file) override;
 
     /**
      * @brief Phase 2: Iteratively merges runs from one bucket to another in parallel
      * until a single sorted run remains.
      * @return A const reference to the FileManager containing the final sorted data.
      */
-    const std::unique_ptr<FileManager> &external_sort() override;
+    const FileManager &external_sort() override;
 
 private:
-    // A comparator for the min-heap to order strings in ascending order.
-    using MinHeapComparator = std::greater<std::string>;
-    using MinHeap = std::priority_queue<std::string, std::vector<std::string>, MinHeapComparator>;
+    // Struct for the replacement selection heap. Caches the numeric key for sorting.
+    struct HeapItem {
+        std::string line;
+        long long key;
+
+        // Overload operator< to make std::priority_queue a max-heap on the key.
+        // This produces runs sorted in descending order.
+        bool operator<(const HeapItem& other) const {
+            return key < other.key;
+        }
+    };
+    // A max-heap for generating descending-order runs.
+    using MaxHeap = std::priority_queue<HeapItem>;
 
     /**
      * @brief A single k-way merge task that merges multiple source files into one destination file.
-     * @param sources A vector of InputDevices to read from.
-     * @param destination The OutputDevice to write the merged run to.
+     * @param sources A vector of Readers to read from.
+     * @param destination The Writer to write the merged run to.
      */
     void merge_group(
-        std::vector<std::reference_wrapper<InputDevice>> sources,
-        OutputDevice &destination
+        std::vector<std::reference_wrapper<Reader>> sources,
+        BufferedWriter &destination
     );
 
     /**
@@ -99,13 +112,13 @@ private:
      * @return The number of runs produced in the destination bucket.
      */
     size_t parallel_merge_pass(
-        std::vector<std::unique_ptr<FileManager>> &from_bucket,
-        std::vector<std::unique_ptr<FileManager>> &to_bucket
+        std::vector<FileManager> &from_bucket,
+        std::vector<FileManager> &to_bucket
     );
 
     // References to the file buckets provided by the framework.
-    std::vector<std::unique_ptr<FileManager>> &b_files_;
-    std::vector<std::unique_ptr<FileManager>> &c_files_;
+    std::vector<FileManager> &b_files_;
+    std::vector<FileManager> &c_files_;
 
     // --- Thread Pool & Synchronization ---
     std::vector<std::thread> thread_pool_;
@@ -118,8 +131,9 @@ private:
     std::atomic<size_t> tasks_in_progress_{0};
 
     // Helper to calculate the number of active (non-empty) files in a bucket.
-    size_t count_active_files(const std::vector<std::unique_ptr<FileManager>> &bucket);
+    size_t count_active_files(const std::vector<FileManager> &bucket);
 
     // Memory budget for the replacement selection heap (480 MiB).
     static constexpr size_t HEAP_MEMORY_BUDGET = 480 * 1024 * 1024;
 };
+

@@ -183,7 +183,7 @@ void writer_thread_func(ChunkQueue &q, const char *filename, std::atomic<uint64_
 
 int main(int argc, char** argv) {
     const char *filename = "input.txt";
-    uint64_t target_bytes = (1ULL << 30); // default 1 GB
+    uint64_t target_bytes = (1ULL << 28); // default 1 GB
     size_t chunk_size = (1ULL << 20); // default 1 MB
 
     if (argc >= 2) filename = argv[1];

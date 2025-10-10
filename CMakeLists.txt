@@ -12,7 +12,11 @@ endif ()
 
 # === Core library ===
 add_library(ExternalSortLib
-        src/streams.cpp
+        src/io/reader.cpp
+        include/io/manager.h
+        src/io/manager.cpp
+        include/io/writer.h
+        src/io/writer.cpp
 )
 
 target_include_directories(ExternalSortLib PUBLIC include)
@@ -30,7 +34,8 @@ add_executable(modified_main src/main.cpp src/solutions/modified.cpp)
 target_link_libraries(modified_main PRIVATE ExternalSortLib)
 target_compile_definitions(modified_main PRIVATE SOLUTION_TYPE=2)
 
-add_executable(ai_main src/main.cpp src/solutions/ai.cpp)
+add_executable(ai_main src/main.cpp src/solutions/ai.cpp
+        include/io/buffered_writer.h)
 target_link_libraries(ai_main PRIVATE ExternalSortLib)
 target_compile_definitions(ai_main PRIVATE SOLUTION_TYPE=3)
 

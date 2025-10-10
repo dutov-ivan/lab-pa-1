@@ -14,7 +14,7 @@ public:
 
     void load_initial_series(const std::unique_ptr<InputDevice> &in) override;
 
-    const std::unique_ptr<FileManager> &external_sort(
+    const FileManager &external_sort(
     ) override;
 
 private:

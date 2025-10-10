@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="CopilotDiffPersistence">
+    <option name="pendingDiffs">
+      <map>
+        <entry key="$PROJECT_DIR$/include/sort.h">
+          <value>
+            <PendingDiffInfo>
+              <option name="filePath" value="$PROJECT_DIR$/include/sort.h" />
+              <option name="updatedContent" value="// filepath: \\wsl.localhost\Ubuntu\home\ivan\code\lab-pa-1\include\sort.h&#10;// Legacy free-function API used by unit tests. These forward to IoDevice-based implementations.&#10;&#10;#ifndef EXTERNALSORTINGLAB1_SORT_H&#10;#define EXTERNALSORTINGLAB1_SORT_H&#10;&#10;#include &quot;file/io.h&quot;&#10;#include &lt;vector&gt;&#10;#include &lt;memory&gt;&#10;&#10;void load_initial_series(const std::unique_ptr&lt;IoDevice&gt; &amp;in,&#10;                         const std::vector&lt;std::unique_ptr&lt;IoDevice&gt; &gt; &amp;out_files);&#10;&#10;void merge_many_into_one(std::vector&lt;std::unique_ptr&lt;IoDevice&gt; &gt; &amp;cur_fileset,&#10;                        const std::unique_ptr&lt;IoDevice&gt; &amp;out_file,&#10;                        uint32_t &amp;active_files);&#10;&#10;void merge_many_into_many(const std::vector&lt;std::unique_ptr&lt;IoDevice&gt; &gt; *cur_fileset,&#10;                          const std::vector&lt;std::unique_ptr&lt;IoDevice&gt; &gt; *opposite_fileset);&#10;&#10;void external_sort(std::vector&lt;std::unique_ptr&lt;IoDevice&gt; &gt; &amp;source,&#10;                   std::vector&lt;std::unique_ptr&lt;IoDevice&gt; &gt; &amp;target);&#10;&#10;#endif //EXTERNALSORTINGLAB1_SORT_H&#10;" />
+            </PendingDiffInfo>
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+</project>

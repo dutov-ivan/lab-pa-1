@@ -56,7 +56,7 @@ void ModifiedSolution::load_initial_series(const std::unique_ptr<InputDevice> &i
     }
 }
 
-const std::unique_ptr<FileManager> &ModifiedSolution::external_sort() {
+const FileManager &ModifiedSolution::external_sort() {
     auto *cur_fileset = &first_bucket_;
     auto *opposite_fileset = &second_bucket_;
     while (true) {
