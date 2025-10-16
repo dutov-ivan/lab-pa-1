@@ -11,17 +11,18 @@
 #include <optional>
 #include <memory>
 
-int get_key(const std::string &s) {
-    if (s.empty()) {
-        throw std::runtime_error("Cannot extract key from empty line.");
-    }
-    size_t pos;
-    const int key = std::stoi(s, &pos);
-    if (pos == 0) {
-        throw std::runtime_error("Could not extract key from line: " + s);
-    }
-    return key;
+inline int fast_atoi(const char* str, size_t len) noexcept {
+    int val = 0;
+    for (size_t i = 0; i < len && str[i] >= '0' && str[i] <= '9'; ++i)
+        val = val * 10 + (str[i] - '0');
+    return val;
 }
+
+inline int get_key(std::string_view s) {
+    if (s.empty()) throw std::runtime_error("Empty line");
+    return fast_atoi(s.data(), s.size());
+}
+
 
 StdSolution::StdSolution(std::vector<FileManager>& first_bucket,
                          std::vector<FileManager>& second_bucket)
@@ -117,12 +118,11 @@ void StdSolution::merge_many_into_many(std::vector<FileManager>* cur_fileset,
             }
         }
         if (!has_more_data) {
-            break; // All runs from all files have been merged.
+            break;
         }
 
         BufferedWriter writer((*opposite_fileset)[output_idx]);
 
-        // Perform a single k-way merge, using the persistent readers and lookahead buffer.
         merge_many_into_one(readers, lookahead_lines, writer);
         writer.flush();
 
@@ -131,7 +131,6 @@ void StdSolution::merge_many_into_many(std::vector<FileManager>* cur_fileset,
 }
 
 
-// Merges a single sorted run from multiple source files into one destination file.
 void StdSolution::merge_many_into_one(
     std::vector<std::unique_ptr<Reader>>& readers,
     std::vector<std::optional<std::string>>& lookahead_lines,
@@ -163,7 +162,6 @@ void StdSolution::merge_many_into_one(
         auto [key, idx] = pq.top();
         pq.pop();
 
-        // Write the line and clear the lookahead buffer for that file.
         out_file.write(lookahead_lines[idx].value());
         out_file.write(std::string("\n"));
         last_key_written = key;

@@ -1,224 +1,265 @@
-//
-// Created by dutov on 10/3/2025.
-//
+#include <vector>
+#include <string>
+#include <string_view>
+#include <queue>
+#include <limits>
+#include <cctype>
+#include <memory>
+#include <stdexcept>
+#include <cstdint>
+#include <cassert>
+#include <algorithm>
 
+#include "io/reader.h"
+#include "../../include/io/buffered_writer.h"
+#include "../../include/io/fast_writer.h"
 #include "../../include/solution/modified.h"
 
-#include <limits>
-#include <charconv>
-#include <queue>
-#include <cassert>
-#include <cstring>
-#include <algorithm>
-#include <stdexcept>
+// ---------- Configurable memory budget ----------
+static constexpr std::size_t TOTAL_MEMORY_BUDGET_BYTES = 500ull * 1024 * 1024; // 500 MB
+// Split budget: 84% readers, 12% writer, rest for overhead
+static constexpr std::size_t READER_BUDGET = (TOTAL_MEMORY_BUDGET_BYTES * 84) / 100;
+static constexpr std::size_t WRITER_BUFFER_BUDGET = (TOTAL_MEMORY_BUDGET_BYTES * 12) / 100;
 
-int get_key(const std::string &s) {
-    size_t pos;
-    int key = std::stoi(s, &pos); // stops at first non-digit
-    if (pos == 0) {
-        throw std::runtime_error("Could not extract key from line: " + s);
+// ---------- fast key parser ----------
+inline int fast_get_key_sv(std::string_view s) {
+    if (s.empty()) throw std::runtime_error("Cannot extract key from empty line.");
+    const char *p = s.data();
+    const char *end = p + s.size();
+    bool neg = false;
+    if (*p == '-') { neg = true; ++p; }
+    int val = 0;
+    bool any = false;
+    while (p < end && *p >= '0' && *p <= '9') {
+        any = true;
+        val = val * 10 + (*p - '0');
+        ++p;
     }
-    return key;
+    if (!any) throw std::runtime_error("Could not extract key from line: " + std::string(s));
+    return neg ? -val : val;
 }
 
-bool get_key_from_buffer(int &key, const char *buffer, std::size_t buffer_size, std::size_t &start) {
-    const char *begin = buffer + start;
-    const char *end = buffer + buffer_size; // or known buffer length
+// ---------- Safe refill: build buffer first, then create string_views ----------
+// This version is robust against reallocations.
+static bool refill_segment_from_reader(InMemSegment &seg, Reader &reader, std::size_t max_bytes) {
+    seg.clear();
 
-    int tmp;
-    auto [ptr, ec] = std::from_chars(begin, end, tmp);
+    std::size_t reserve_size = std::max<std::size_t>(max_bytes, 1 << 20);
+    seg.buffer.reserve(reserve_size);
 
-    if (ec != std::errc()) {
-        return false; // invalid or out of range
+    std::string_view line_view;
+    std::size_t accumulated = 0;
+    std::vector<std::size_t> offsets;
+    offsets.reserve(256);
+
+    // Read lines and append to seg.buffer. Save start offsets; do NOT create string_views yet.
+    while (!reader.is_end() && reader.get_line(line_view)) {
+        std::size_t before = seg.buffer.size();
+        seg.buffer.append(line_view.data(), line_view.size());
+        seg.buffer.push_back('\n');
+        offsets.push_back(before);
+
+        accumulated += line_view.size() + 1;
+        if (accumulated >= max_bytes) break;
     }
 
-    if (ptr == begin) {
-        return false; // no digits consumed
+    if (offsets.empty()) {
+        return false;
     }
 
-    key = tmp;
-    start = static_cast<std::size_t>(ptr - buffer); // update caller’s offset
+    // Create stable string_views into seg.buffer AFTER all appends are finished.
+    seg.lines.reserve(offsets.size());
+    const char* buf_data = seg.buffer.data();
+    const char* buf_end = buf_data + seg.buffer.size();
+    for (std::size_t off : offsets) {
+        const char* start_ptr = buf_data + off;
+        const char* cur = start_ptr;
+        while (cur < buf_end && *cur != '\n') ++cur;
+        std::size_t len = static_cast<std::size_t>(cur - start_ptr);
+        seg.lines.emplace_back(start_ptr, len);
+    }
+
+    seg.next_index = 0;
     return true;
 }
 
-ModifiedSolution::ModifiedSolution(const std::vector<std::unique_ptr<FileManager> > &first_bucket,
-                                   const std::vector<std::unique_ptr<FileManager> > &second_bucket) {
-    assert(first_bucket.size() == second_bucket.size());
-    std::vector<std::unique_ptr<InputDevice> > first_inputs(first_bucket.size());
-    std::vector<std::unique_ptr<OutputDevice> > first_outputs(first_bucket.size());
-    for (size_t i = 0; i < first_bucket.size(); ++i) {
-        int fd = first_bucket[i]->get_fd();
-        first_inputs[i] = std::make_unique<MmappedInputDevice>(fd);
-        first_outputs[i] = std::make_unique<BufferWritingDevice>(fd);
-    }
-
-    std::vector<std::unique_ptr<InputDevice> > second_inputs(second_bucket.size());
-    std::vector<std::unique_ptr<OutputDevice> > second_outputs(second_bucket.size());
-    for (size_t i = 0; i < first_bucket.size(); ++i) {
-        int fd = first_bucket[i]->get_fd();
-        second_inputs[i] = std::make_unique<MmappedInputDevice>(fd);
-        second_outputs[i] = std::make_unique<BufferWritingDevice>(fd);
-    }
+// ---------- ModifiedSolution implementation ----------
+ModifiedSolution::ModifiedSolution(std::vector<FileManager> &first_bucket, std::vector<FileManager> &second_bucket)
+    : first_bucket_(first_bucket), second_bucket_(second_bucket) {
+    assert(first_bucket_.size() == second_bucket_.size());
 }
 
-void ModifiedSolution::write_entries(const std::vector<std::pair<int, std::string> > &entries,
-                                     std::unique_ptr<OutputDevice> &out) {
-    constexpr size_t BUFFER_SIZE = 64 * 1024; // 64 KB buffer
-    char buffer[BUFFER_SIZE];
-    size_t pos = 0;
+void ModifiedSolution::load_initial_series(FileManager &source) {
+    Reader reader(source);
 
-    for (size_t i = 0; i < entries.size(); ++i) {
-        const auto &[num, str] = entries[i];
-        std::string line = std::to_string(num) + "-" + str + "\n";
+    const size_t OUT_CNT = first_bucket_.size();
+    std::vector<std::string> out_buffers(OUT_CNT);
 
-        if (pos + line.size() > BUFFER_SIZE) {
-            out->write(buffer, pos);
-            pos = 0;
-        }
+    std::size_t per_writer_flush = std::max<std::size_t>(1 << 20, WRITER_BUFFER_BUDGET / std::max<size_t>(1, OUT_CNT));
+    for (auto &s : out_buffers) s.reserve(std::min<std::size_t>(per_writer_flush, 1 << 20));
 
-        std::memcpy(buffer + pos, line.data(), line.size());
-        pos += line.size();
-    }
-
-    // flush remaining
-    if (pos > 0) {
-        out->write(buffer, pos);
-    }
-}
-
-void ModifiedSolution::load_initial_series(const std::unique_ptr<BufferedInputDevice> &in) {
-    const std::vector<std::unique_ptr<FileManager> > &out_files = first_bucket_;
     int series_count = 0;
-    constexpr std::size_t MB_100 = 100 * 1024 * 1024;
-    const char *buffer;
-    std::size_t buffer_size;
+    int last_key = std::numeric_limits<int>::min();
 
+    std::string_view line_view;
+    size_t writer_idx = 0;
+    while (reader.get_line(line_view)) {
+        if (line_view.empty()) continue;
+        int new_key = fast_get_key_sv(line_view);
 
-    std::string remnant = "";
-    while ((buffer_size = in->next_buffer(&buffer))) {
-        std::vector<std::pair<int, std::string> > entries;
-        std::size_t offset = 0;
-        while (offset < buffer_size) {
-            int key = 0;
-            std::string line = "";
+        if (new_key < last_key) ++series_count;
+        last_key = new_key;
+        writer_idx = series_count % OUT_CNT;
 
-            if (!get_key_from_buffer(key, buffer, buffer_size, offset) && remnant.empty()) {
-                throw std::runtime_error("Malformed input: could not read key from buffer");
-            };
+        out_buffers[writer_idx].append(line_view.data(), line_view.size());
+        out_buffers[writer_idx].push_back('\n');
 
-            auto nl = static_cast<const char *>(std::memchr(buffer + offset, '\n', buffer_size - offset));
-            if (!nl) {
-                remnant = std::string(buffer + offset, buffer_size - offset);
-                continue;
-            }
-
-
-            if (!remnant.empty()) {
-                line = remnant;
-                remnant = "";
-            }
-
-            line += std::string(buffer + offset, nl - (buffer + offset));
-
-            entries.emplace_back(key, line);
-
-            offset += (nl - (buffer + offset)) + 1; // move past newline
+        if (out_buffers[writer_idx].size() >= per_writer_flush) {
+            BufferedWriter writer(first_bucket_[writer_idx]);
+            writer.write(out_buffers[writer_idx]);
+            writer.flush();
+            out_buffers[writer_idx].clear();
         }
-
-        std::sort(entries.begin(), entries.end(), [](const auto &a, const auto &b) {
-            return a.first < b.first;
-        });
-
-
-        std::unique_ptr<OutputDevice> &os = out_files[series_count % out_files.size()]->output();
-        write_entries(entries, os);
-        series_count++;
     }
 
-    for (const auto &file: out_files) {
-        file->reset_cursor();
+    for (size_t i = 0; i < OUT_CNT; ++i) {
+        if (!out_buffers[i].empty()) {
+            BufferedWriter writer(first_bucket_[i]);
+            writer.write(out_buffers[i]);
+            writer.flush();
+            out_buffers[i].clear();
+        }
     }
+
+    for (auto &file : first_bucket_) file.reset_cursor();
 }
 
 const FileManager &ModifiedSolution::external_sort() {
     auto *cur_fileset = &first_bucket_;
     auto *opposite_fileset = &second_bucket_;
     while (true) {
-        if (!(*cur_fileset)[0]->is_empty() && (*cur_fileset)[1]->is_empty()) {
-            return (*cur_fileset)[0];
+        size_t files_with_content = 0;
+        int content_file_idx = -1;
+        for (size_t i = 0; i < cur_fileset->size(); ++i) {
+            if (!(*cur_fileset)[i].is_empty()) {
+                files_with_content++;
+                content_file_idx = static_cast<int>(i);
+            }
+        }
+        if (files_with_content <= 1) {
+            return (content_file_idx == -1) ? (*cur_fileset)[0] : (*cur_fileset)[content_file_idx];
         }
         merge_many_into_many(cur_fileset, opposite_fileset);
-
-        for (const auto &file: *opposite_fileset) { file->output()->flush(); }
-
-        for (const auto &file: *cur_fileset) {
-            file->clear();
-        }
-
-        for (const auto &file: *opposite_fileset) {
-            file->reset_cursor();
-        }
-
+        for (auto &file : *opposite_fileset) { file.reset_cursor(); }
+        for (auto &file : *cur_fileset) { file.clear(); }
         std::swap(cur_fileset, opposite_fileset);
     }
 }
 
-void ModifiedSolution::merge_many_into_many(const std::vector<std::unique_ptr<FileManager> > *cur_fileset,
-                                            const std::vector<std::unique_ptr<FileManager> > *opposite_fileset) {
+void ModifiedSolution::merge_many_into_many(std::vector<FileManager> *cur_fileset,
+                                            std::vector<FileManager> *opposite_fileset) {
     const size_t FILE_COUNT = cur_fileset->size();
-    uint32_t active_files = (1u << FILE_COUNT) - 1;
+    if (FILE_COUNT == 0) return;
 
-    size_t output_count = 0;
-    while (active_files != 0) {
-        uint32_t temp = active_files;
-        while (temp != 0) {
-            const int output_idx = output_count % FILE_COUNT;
-            merge_many_into_one(*cur_fileset, (*opposite_fileset)[output_idx]->output(), active_files);
-            output_count++;
+    std::size_t per_file_budget = std::max<std::size_t>(1 << 20, READER_BUDGET / FILE_COUNT);
 
-            temp &= temp - 1;
+    std::vector<std::unique_ptr<Reader>> readers;
+    readers.reserve(FILE_COUNT);
+    for (size_t i = 0; i < FILE_COUNT; ++i) {
+        readers.push_back(std::make_unique<Reader>((*cur_fileset)[i]));
+    }
+
+    std::vector<InMemSegment> segments(FILE_COUNT);
+
+    size_t output_idx = 0;
+
+    for (size_t i = 0; i < FILE_COUNT; ++i) {
+        refill_segment_from_reader(segments[i], *readers[i], per_file_budget);
+    }
+
+    while (true) {
+        bool has_more = false;
+        for (size_t i = 0; i < FILE_COUNT; ++i) {
+            if (segments[i].has_next() || !readers[i]->is_end()) { has_more = true; break; }
+        }
+        if (!has_more) break;
+
+        BufferedWriter bw((*opposite_fileset)[output_idx]);
+        FastWriterWrapper fastWriter(bw, WRITER_BUFFER_BUDGET);
+
+        merge_many_into_one(readers, segments, fastWriter, per_file_budget);
+
+        output_idx = (output_idx + 1) % opposite_fileset->size();
+
+        for (size_t i = 0; i < FILE_COUNT; ++i) {
+            if (!segments[i].has_next() && !readers[i]->is_end()) {
+                refill_segment_from_reader(segments[i], *readers[i], per_file_budget);
+            }
         }
     }
 }
 
-void ModifiedSolution::merge_many_into_one(const std::vector<std::unique_ptr<FileManager> > &cur_fileset,
-                                           const std::unique_ptr<OutputDevice> &out_file,
-                                           uint32_t &active_files) {
-    const size_t FILE_COUNT = cur_fileset.size();
-    std::vector<std::string> lines(FILE_COUNT);
-    std::priority_queue<std::pair<int, int> > pq; // (key, file_index)
+struct PQEntry {
+    int key;
+    size_t file_idx;
+    size_t line_index;
+    bool operator>(PQEntry const &o) const {
+        return key > o.key || (key == o.key && file_idx > o.file_idx);
+    }
+};
 
-    // Initial pass to retrieve all initial keys of the runs.
-    for (int i = 0; i < FILE_COUNT; i++) {
-        const auto &is = cur_fileset[i]->input();
-        if (!is->get_line(lines[i])) {
-            active_files &= ~(1 << i);
-            continue;
+void ModifiedSolution::merge_many_into_one(
+    std::vector<std::unique_ptr<Reader>> &readers,
+    std::vector<InMemSegment> &segments,
+    FastWriterWrapper &out_writer,
+    std::size_t per_file_budget) {
+
+    const size_t FILE_COUNT = readers.size();
+    std::priority_queue<PQEntry, std::vector<PQEntry>, std::greater<>> pq;
+
+    for (size_t i = 0; i < FILE_COUNT; ++i) {
+        if (segments[i].has_next()) {
+            std::string_view sv = segments[i].peek();
+            int key = fast_get_key_sv(sv);
+            pq.push(PQEntry{key, i, segments[i].next_index});
         }
-        const int key = get_key(lines[i]);
-        pq.emplace(key, i);
     }
 
+    if (pq.empty()) return;
+
+    int last_key_written = std::numeric_limits<int>::min();
+
     while (!pq.empty()) {
-        auto [key, idx] = pq.top();
-        pq.pop();
+        PQEntry e = pq.top(); pq.pop();
 
-        // Push the line with that element to the output
-        out_file->write(lines[idx] + "\n");
+        InMemSegment &seg = segments[e.file_idx];
+        assert(seg.next_index == e.line_index);
+        std::string_view line_sv = seg.pop();
+        out_writer.push_line(line_sv);
+        last_key_written = e.key;
 
-        // Load new line from the file we got the line we pushed
-        const auto &is = cur_fileset[idx]->input();
-        if (is->peek(lines[idx])) {
-            int new_key = get_key(lines[idx]);
-
-            if (new_key > key) {
-                // Invalid key = new series
-                continue;
+        if (seg.has_next()) {
+            std::string_view next_sv = seg.peek();
+            int next_key = fast_get_key_sv(next_sv);
+            // --- FIX 1: Corrected Logic ---
+            // A new key must be >= the last key to be part of the same sorted run.
+            if (next_key >= last_key_written) {
+                pq.push(PQEntry{next_key, e.file_idx, seg.next_index});
             }
-            is->skip(lines[idx].size());
-            pq.emplace(new_key, idx);
         } else {
-            active_files &= ~(1u << idx);
+            size_t idx = e.file_idx;
+            if (!readers[idx]->is_end()) {
+                bool loaded = refill_segment_from_reader(seg, *readers[idx], per_file_budget);
+                if (loaded && seg.has_next()) {
+                    std::string_view head = seg.peek();
+                    int head_key = fast_get_key_sv(head);
+                    // --- FIX 2: Corrected Logic ---
+                    // Same logic applies after refilling a buffer.
+                    if (head_key >= last_key_written) {
+                        pq.push(PQEntry{head_key, idx, seg.next_index});
+                    }
+                }
+            }
         }
     }
 }

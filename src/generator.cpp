@@ -181,14 +181,44 @@ void writer_thread_func(ChunkQueue &q, const char *filename, std::atomic<uint64_
     q.set_finished(); // in case producers or consumers are still waiting
 }
 
+uint64_t parse_size(const std::string& str) {
+    size_t i = 0;
+    // Extract numeric prefix
+    while (i < str.size() && (std::isdigit(str[i]) || str[i] == '.')) ++i;
+    if (i == 0) throw std::invalid_argument("Missing number in size");
+
+    double value = std::stod(str.substr(0, i));
+    std::string suffix;
+    for (; i < str.size(); ++i)
+        suffix += std::tolower(static_cast<unsigned char>(str[i]));
+
+    uint64_t multiplier = 1;
+
+    if (suffix.empty() || suffix == "b") {
+        multiplier = 1;
+    } else if (suffix == "k" || suffix == "kb") {
+        multiplier = 1ULL << 10;
+    } else if (suffix == "m" || suffix == "mb") {
+        multiplier = 1ULL << 20;
+    } else if (suffix == "g" || suffix == "gb") {
+        multiplier = 1ULL << 30;
+    } else if (suffix == "t" || suffix == "tb") {
+        multiplier = 1ULL << 40;
+    } else {
+        throw std::invalid_argument("Unknown size suffix: " + suffix);
+    }
+
+    return static_cast<uint64_t>(value * multiplier);
+}
+
 int main(int argc, char** argv) {
     const char *filename = "input.txt";
     uint64_t target_bytes = (1ULL << 24); // default 1 GB
     size_t chunk_size = (1ULL << 20); // default 1 MB
 
     if (argc >= 2) filename = argv[1];
-    if (argc >= 3) target_bytes = std::stoull(argv[2]);
-    if (argc >= 4) chunk_size = static_cast<size_t>(std::stoull(argv[3]));
+    if (argc >= 3) target_bytes = parse_size(argv[2]);
+    if (argc >= 4) chunk_size = parse_size(argv[3]);
 
     unsigned hw = std::thread::hardware_concurrency();
     unsigned producer_count = hw > 1 ? hw - 1 : 1;

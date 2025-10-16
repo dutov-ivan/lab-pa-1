@@ -40,9 +40,10 @@ int main(int argc, char const *argv[]) {
     std::vector<FileManager> b_files = initialize_merge_files( "b", FILE_COUNT);
     std::vector<FileManager> c_files = initialize_merge_files( "c", FILE_COUNT);
 
-    ActiveSolution solution(b_files, c_files);
+    ActiveSolution solution(b_files, c_files, 500 * 1024 * 1024); // 500 MB limit for AI solution
 
-    solution.load_initial_series(in_manager);
+    Reader in(in_manager);
+    solution.load_initial_series(in);
 
     const FileManager &result = solution.external_sort();
     return 0;

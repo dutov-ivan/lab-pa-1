@@ -17,6 +17,7 @@ add_library(ExternalSortLib
         src/io/manager.cpp
         include/io/writer.h
         src/io/writer.cpp
+        include/io/fast_writer.h
 )
 
 target_include_directories(ExternalSortLib PUBLIC include)
