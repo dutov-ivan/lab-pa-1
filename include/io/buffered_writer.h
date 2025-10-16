@@ -61,6 +61,29 @@ public:
     }
 
     /**
+ * @brief Writes a string_view to the buffer. Flushes if the buffer is full.
+ * @param sv The string_view to write.
+ */
+    void write(std::string_view sv) {
+        const char* data = sv.data();
+        size_t len = sv.size();
+
+        // If the new data doesn't fit in the remaining buffer space, flush first.
+        if (current_pos_ + len > buffer_.size()) {
+            flush();
+        }
+
+        // If the data is larger than the entire buffer, write it directly.
+        if (len > buffer_.size()) {
+            writer_.write_all(data, len);
+        } else {
+            // Otherwise, copy the data into the buffer.
+            std::copy(data, data + len, buffer_.data() + current_pos_);
+            current_pos_ += len;
+        }
+    }
+
+    /**
      * @brief Flushes the contents of the internal buffer to the disk.
      */
     void flush() {

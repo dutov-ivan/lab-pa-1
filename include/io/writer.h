@@ -11,11 +11,18 @@
 class Writer {
 public:
     explicit Writer(FileManager& fm);
-    ~Writer();
+    ~Writer() = default; // The writer does not own the file, so it should not close it.
 
     // non-copyable
     Writer(const Writer&) = delete;
     Writer& operator=(const Writer&) = delete;
+
+    // Movable (but not move-assignable)
+    Writer(Writer&& other) noexcept
+        : fm_(other.fm_) {} // Move constructor works by re-binding the reference.
+
+    Writer& operator=(Writer&&) = delete; // Cannot be move-assignable due to reference member.
+
 
     // Write entire buffer (loops on partial writes). Returns total bytes written.
     // Throws std::system_error on fatal error.
@@ -31,11 +38,11 @@ public:
     // Flush to disk (fsync / FlushFileBuffers)
     void flush();
 
-    // Close writer (also closes underlying file manager)
-    void close();
+    // The 'close' method has been removed. The FileManager is responsible for closing the file.
 
 private:
     FileManager& fm_;
 };
 
 #endif // WRITER_H
+

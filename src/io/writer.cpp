@@ -13,10 +13,6 @@
 
 Writer::Writer(FileManager& fm) : fm_(fm) {}
 
-Writer::~Writer() {
-    try { close(); } catch(...) {}
-}
-
 std::size_t Writer::write_all(const char* data, std::size_t len) {
     if (!fm_.is_open()) {
         throw std::system_error(EINVAL, std::generic_category(), "file not open");
@@ -78,9 +74,4 @@ void Writer::flush() {
         throw std::system_error(e, std::generic_category(), "fsync failed");
     }
 #endif
-}
-
-void Writer::close() {
-    // keep simple: closing file manager closes handle for both writer & others
-    fm_.close();
 }

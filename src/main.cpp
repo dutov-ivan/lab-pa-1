@@ -5,9 +5,7 @@
 #include <filesystem>
 #include <fcntl.h>
 
-#include "../include/file/manager.h"
-#include "../include/file/input.h"
-#include "../include/file/output.h"
+#include "../include/io/manager.h"
 
 #if SOLUTION_TYPE == 1
 #include "../include/solution/standard.h"
@@ -24,6 +22,7 @@ using ActiveSolution = AiSolution;
 
 std::vector<FileManager> initialize_merge_files(const std::string &prefix, std::size_t count) {
     std::vector<FileManager> files;
+    files.reserve(count);
     for (std::size_t i = 0; i < count; i++) {
         const std::string path = prefix + std::to_string(i) + ".txt";
         if (std::filesystem::exists(path)) {
@@ -31,7 +30,7 @@ std::vector<FileManager> initialize_merge_files(const std::string &prefix, std::
         }
         files.emplace_back(path, true, 0644);
     }
-    return std::move(files);
+    return files;
 }
 
 int main(int argc, char const *argv[]) {

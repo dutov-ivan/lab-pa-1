@@ -1,138 +1,189 @@
-//
 // Created by dutov on 10/3/2025.
 //
-
 #include "../../include/solution/standard.h"
+#include "io/reader.h"
+#include "io/buffered_writer.h"
 #include <limits>
 #include <queue>
 #include <cassert>
+#include <vector>
+#include <string_view>
+#include <optional>
+#include <memory>
 
 int get_key(const std::string &s) {
+    if (s.empty()) {
+        throw std::runtime_error("Cannot extract key from empty line.");
+    }
     size_t pos;
-    int key = std::stoi(s, &pos); // stops at first non-digit
+    const int key = std::stoi(s, &pos);
     if (pos == 0) {
         throw std::runtime_error("Could not extract key from line: " + s);
     }
     return key;
 }
 
-StdSolution::StdSolution(const std::vector<std::unique_ptr<FileManager> > &first_bucket,
-                         const std::vector<std::unique_ptr<FileManager> > &second_bucket) : first_bucket_(first_bucket),
-    second_bucket_(second_bucket) {
+StdSolution::StdSolution(std::vector<FileManager>& first_bucket,
+                         std::vector<FileManager>& second_bucket)
+    : first_bucket_(first_bucket), second_bucket_(second_bucket) {
     assert(first_bucket_.size() == second_bucket_.size());
 }
 
-void StdSolution::load_initial_series(const std::unique_ptr<BufferedInputDevice> &in) {
-    const std::vector<std::unique_ptr<FileManager> > &out_files = first_bucket_;
-    int series_count = 0;
-    int last_key = std::numeric_limits<int>::max();
-    std::string line;
-    std::string buffer;
+void StdSolution::load_initial_series(FileManager& source) {
+    Reader reader(source);
 
-    while (in->get_line(line)) {
-        if (line == "") {
-            break;
+    // Using unique_ptrs to manage writer lifetimes correctly.
+    std::vector<std::unique_ptr<BufferedWriter>> writers;
+    for (FileManager& file : first_bucket_) {
+        writers.push_back(std::make_unique<BufferedWriter>(file));
+    }
+
+    int series_count = 0;
+    int last_key = std::numeric_limits<int>::min();
+    std::string_view line_view;
+
+    while (reader.get_line(line_view)) {
+        if (line_view.empty()) {
+            continue; // Skip empty lines
         }
-        const int new_key = get_key(line);
-        const std::unique_ptr<OutputDevice> &os = out_files[series_count % out_files.size()]->output();
-        if (new_key > last_key) {
-            os->write(buffer);
-            buffer.clear();
+        const int new_key = get_key(std::string(line_view));
+
+        if (new_key < last_key) {
             series_count++;
         }
         last_key = new_key;
-        buffer += line + "\n";
+
+        writers[series_count % writers.size()]->write(line_view);
+        writers[series_count % writers.size()]->write(std::string("\n"));
     }
 
-    if (!buffer.empty()) {
-        const std::unique_ptr<OutputDevice> &os = out_files[series_count % out_files.size()]->output();
-        os->write(buffer);
+    // Explicitly flush all writers before their destructors are called.
+    for (auto& writer : writers) {
+        writer->flush();
     }
-
-    for (const auto &file: out_files) {
-        file->reset_cursor();
+    for (auto& file : first_bucket_) {
+        file.reset_cursor();
     }
 }
 
-const FileManager &StdSolution::external_sort() {
-    auto *cur_fileset = &first_bucket_;
-    auto *opposite_fileset = &second_bucket_;
+const FileManager& StdSolution::external_sort() {
+    auto* cur_fileset = &first_bucket_;
+    auto* opposite_fileset = &second_bucket_;
+
     while (true) {
-        if (!(*cur_fileset)[0]->is_empty() && (*cur_fileset)[1]->is_empty()) {
-            return (*cur_fileset)[0];
+        size_t files_with_content = 0;
+        int content_file_idx = -1;
+        for (size_t i = 0; i < cur_fileset->size(); ++i) {
+            if (!(*cur_fileset)[i].is_empty()) {
+                files_with_content++;
+                content_file_idx = i;
+            }
         }
+
+        if (files_with_content <= 1) {
+            return (content_file_idx == -1) ? (*cur_fileset)[0] : (*cur_fileset)[content_file_idx];
+        }
+
         merge_many_into_many(cur_fileset, opposite_fileset);
 
-        for (const auto &file: *opposite_fileset) { file->output()->flush(); }
-
-        for (const auto &file: *cur_fileset) {
-            file->clear();
+        for (auto& file : *opposite_fileset) {
+            file.reset_cursor();
         }
-
-        for (const auto &file: *opposite_fileset) {
-            file->reset_cursor();
+        for (auto& file : *cur_fileset) {
+            file.clear();
         }
 
         std::swap(cur_fileset, opposite_fileset);
     }
 }
 
-void StdSolution::merge_many_into_many(const std::vector<std::unique_ptr<FileManager> > *cur_fileset,
-                                       const std::vector<std::unique_ptr<FileManager> > *opposite_fileset) {
+void StdSolution::merge_many_into_many(std::vector<FileManager>* cur_fileset,
+                                       std::vector<FileManager>* opposite_fileset) {
     const size_t FILE_COUNT = cur_fileset->size();
-    uint32_t active_files = (1u << FILE_COUNT) - 1;
+    size_t output_idx = 0;
 
-    size_t output_count = 0;
-    while (active_files != 0) {
-        uint32_t temp = active_files;
-        while (temp != 0) {
-            const int output_idx = output_count % FILE_COUNT;
-            merge_many_into_one(*cur_fileset, (*opposite_fileset)[output_idx]->output(), active_files);
-            output_count++;
+    std::vector<std::unique_ptr<Reader>> readers;
+    for (size_t i = 0; i < FILE_COUNT; ++i) {
+        readers.push_back(std::make_unique<Reader>((*cur_fileset)[i]));
+    }
+    std::vector<std::optional<std::string>> lookahead_lines(FILE_COUNT, std::nullopt);
 
-            temp &= temp - 1;
+    while (true) {
+        bool has_more_data = false;
+        for(size_t i = 0; i < FILE_COUNT; ++i) {
+            if (lookahead_lines[i].has_value() || !readers[i]->is_end()) {
+                has_more_data = true;
+                break;
+            }
         }
+        if (!has_more_data) {
+            break; // All runs from all files have been merged.
+        }
+
+        BufferedWriter writer((*opposite_fileset)[output_idx]);
+
+        // Perform a single k-way merge, using the persistent readers and lookahead buffer.
+        merge_many_into_one(readers, lookahead_lines, writer);
+        writer.flush();
+
+        output_idx = (output_idx + 1) % opposite_fileset->size();
     }
 }
 
-void StdSolution::merge_many_into_one(const std::vector<std::unique_ptr<FileManager> > &cur_fileset,
-                                      const std::unique_ptr<OutputDevice> &out_file,
-                                      uint32_t &active_files) {
-    const size_t FILE_COUNT = cur_fileset.size();
-    std::vector<std::string> lines(FILE_COUNT);
-    std::priority_queue<std::pair<int, int> > pq; // (key, file_index)
 
-    // Initial pass to retrieve all initial keys of the runs.
-    for (int i = 0; i < FILE_COUNT; i++) {
-        const auto &is = cur_fileset[i]->input();
-        if (!is->get_line(lines[i])) {
-            active_files &= ~(1 << i);
-            continue;
+// Merges a single sorted run from multiple source files into one destination file.
+void StdSolution::merge_many_into_one(
+    std::vector<std::unique_ptr<Reader>>& readers,
+    std::vector<std::optional<std::string>>& lookahead_lines,
+    BufferedWriter& out_file)
+{
+    const size_t FILE_COUNT = readers.size();
+    std::priority_queue<std::pair<int, int>, std::vector<std::pair<int, int>>, std::less<>> pq;
+
+    for (int i = 0; i < FILE_COUNT; ++i) {
+        if (lookahead_lines[i].has_value()) {
+            pq.emplace(get_key(lookahead_lines[i].value()), i);
+        } else {
+            std::string_view view;
+            if (!readers[i]->is_end() && readers[i]->get_line(view)) {
+                std::string line = std::string(view);
+                pq.emplace(get_key(line), i);
+                lookahead_lines[i] = std::move(line); // Store it in the lookahead buffer
+            }
         }
-        const int key = get_key(lines[i]);
-        pq.emplace(key, i);
     }
+
+    if (pq.empty()) {
+        return;
+    }
+
+    int last_key_written = std::numeric_limits<int>::min();
 
     while (!pq.empty()) {
         auto [key, idx] = pq.top();
         pq.pop();
 
-        // Push the line with that element to the output
-        out_file->write(lines[idx] + "\n");
+        // Write the line and clear the lookahead buffer for that file.
+        out_file.write(lookahead_lines[idx].value());
+        out_file.write(std::string("\n"));
+        last_key_written = key;
+        lookahead_lines[idx].reset();
 
-        // Load new line from the file we got the line we pushed
-        const auto &is = cur_fileset[idx]->input();
-        if (is->peek(lines[idx])) {
-            int new_key = get_key(lines[idx]);
+        // Try to read the next line from the same file.
+        std::string_view view;
+        if (!readers[idx]->is_end() && readers[idx]->get_line(view)) {
+            std::string next_line = std::string(view);
+            int next_key = get_key(next_line);
 
-            if (new_key > key) {
-                // Invalid key = new series
-                continue;
+            // If the next line is part of the current sorted run, add it to the queue.
+            if (next_key <= last_key_written) {
+                pq.emplace(next_key, idx);
+                lookahead_lines[idx] = std::move(next_line);
+            } else {
+                // The run in this file has ended. Store the line we just read
+                // in the lookahead buffer for the *next* merge operation.
+                lookahead_lines[idx] = std::move(next_line);
             }
-            is->skip(lines[idx].size());
-            pq.emplace(new_key, idx);
-        } else {
-            active_files &= ~(1u << idx);
         }
     }
 }
